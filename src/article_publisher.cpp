@@ -11,7 +11,6 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-
 const std::string DB_PATH = "/var/lib/grabbiel-db/content.db";
 const std::string STORAGE_ROOT = "/var/lib/article-content/";
 
