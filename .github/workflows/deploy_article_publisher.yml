@@ -31,11 +31,12 @@ jobs:
           echo "[*] Creating necessary directories on VM..."
           ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP '
             sudo mkdir -p /usr/local/bin
-            sudo mkdir -p /tmp/article-publisher
+            sudo rm -rf /tmp/article-publisher
+            mkdir -p /tmp/article-publisher
           '
 
           echo "[*] Transferring files..."
-          scp -i ~/.ssh/id_rsa src/article_publisher.cpp $VM_USER@$VM_IP:/tmp/article_publisher.cpp
+          scp -i ~/.ssh/id_rsa src/* $VM_USER@$VM_IP:/tmp/article-publisher/
           scp -i ~/.ssh/id_rsa scripts/build_article_publisher.sh $VM_USER@$VM_IP:/tmp/
           scp -i ~/.ssh/id_rsa systemd/article-publisher.service $VM_USER@$VM_IP:/tmp/
 
