@@ -1,0 +1,14 @@
+[Unit]
+Description=Article Publisher Service
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/article_publisher
+WorkingDirectory=/usr/local/bin
+Restart=always
+RestartSec=5s
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

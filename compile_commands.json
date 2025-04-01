@@ -1,0 +1,12 @@
+[
+  {
+    "directory": "/Users/rumpology/code/repo/grabbielpub",
+    "command": "g++ -std=c++17 -Wall -Wextra -I./src -o article_publisher src/article_publisher.cpp src/https_server.cpp",
+    "file": "src/article_publisher.cpp"
+  },
+  {
+    "directory": "/Users/rumpology/code/repo/grabbielpub",
+    "command": "g++ -std=c++17 -Wall -Wextra -I./src -o article_publisher src/article_publisher.cpp src/https_server.cpp",
+    "file": "src/https_server.cpp"
+  }
+]
