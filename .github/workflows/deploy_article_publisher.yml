@@ -1,0 +1,54 @@
+name: Deploy Article Publisher
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "systemd/**"
+  workflow_dispatch:
+
+jobs:
+  deploy-article-publisher:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Deploy Article Publisher
+        env:
+          PRIVATE_KEY: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_IP: ${{ secrets.VM_IP }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan $VM_IP >> ~/.ssh/known_hosts
+
+          echo "[*] Creating necessary directories on VM..."
+          ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP '
+            sudo mkdir -p /usr/local/bin
+            sudo mkdir -p /tmp/article-publisher
+          '
+
+          echo "[*] Transferring files..."
+          scp -i ~/.ssh/id_rsa src/article_publisher.cpp $VM_USER@$VM_IP:/tmp/article_publisher.cpp
+          scp -i ~/.ssh/id_rsa scripts/build_article_publisher.sh $VM_USER@$VM_IP:/tmp/
+          scp -i ~/.ssh/id_rsa systemd/article-publisher.service $VM_USER@$VM_IP:/tmp/
+
+          echo "[*] Compiling and deploying..."
+          ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP '
+            sudo apt-get update
+            sudo apt-get install -y g++ libsqlite3-dev
+
+            sudo mv /tmp/article-publisher.service /etc/systemd/system/
+            bash /tmp/build_article_publisher.sh
+
+            sudo systemctl daemon-reload
+            sudo systemctl enable article-publisher
+            sudo systemctl restart article-publisher
+            sudo systemctl status article-publisher --no-pager
+          '
