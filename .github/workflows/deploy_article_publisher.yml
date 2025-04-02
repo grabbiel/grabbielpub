@@ -22,6 +22,7 @@ jobs:
           PRIVATE_KEY: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
           VM_USER: ${{ secrets.VM_USER }}
           VM_IP: ${{ secrets.VM_IP }}
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
         run: |
           mkdir -p ~/.ssh
           echo "$PRIVATE_KEY" > ~/.ssh/id_rsa
@@ -31,9 +32,14 @@ jobs:
           echo "[*] Creating necessary directories on VM..."
           ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP '
             sudo mkdir -p /usr/local/bin
+            sudo mkdir -p /etc/grabbiel
             sudo rm -rf /tmp/article-publisher
             mkdir -p /tmp/article-publisher
           '
+
+          echo "[*] Setting up GCS service account key..."
+          echo "$GCP_SERVICE_ACCOUNT_KEY" | ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP 'sudo tee /etc/grabbiel/gcs-key.json > /dev/null'
+          ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP 'sudo chmod 600 /etc/grabbiel/gcs-key.json'
 
           echo "[*] Transferring files..."
           scp -i ~/.ssh/id_rsa src/* $VM_USER@$VM_IP:/tmp/article-publisher/
