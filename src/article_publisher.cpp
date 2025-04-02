@@ -141,7 +141,8 @@ void rewrite_media_references(
 
     std::ifstream in(file_path);
     if (!in) {
-      std::cerr << "[rewrite] Failed to open " << file_path << " for reading\n";
+      log_to_file("[rewrite] ❌ Failed to open for reading: " +
+                  file_path.string());
       continue;
     }
 
@@ -160,19 +161,20 @@ void rewrite_media_references(
       if (new_content != content) {
         content = new_content;
         modified = true;
+        log_to_file("[rewrite] ✅ Replaced: media/" + local_name + " → " +
+                    gcs_url);
       }
     }
 
     if (modified) {
       std::ofstream out(file_path);
       if (!out) {
-        std::cerr << "[rewrite] Failed to open " << file_path
-                  << " for writing\n";
+        log_to_file("[rewrite] ❌ Failed to open for writing: " +
+                    file_path.string());
         continue;
       }
       out << content;
-      std::cout << "[rewrite] Rewrote media references in: " << file_path
-                << "\n";
+      log_to_file("[rewrite] 📝 Patched file: " + file_path.string());
     }
   }
 }
@@ -299,6 +301,18 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
         fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing);
         store_file_reference(content_id, file_type, rel_path.string());
         log_to_file("Copied local-only file: " + rel_path.string());
+      }
+    }
+
+    // 🧹 Clean up /tmp/ folder if article_dir was a temp upload
+    if (article_dir.string().rfind("/tmp/", 0) == 0) {
+      std::error_code ec;
+      fs::remove_all(article_dir, ec);
+      if (ec) {
+        log_to_file("⚠️ Failed to clean up temp folder: " +
+                    article_dir.string());
+      } else {
+        log_to_file("🧹 Cleaned up temp folder: " + article_dir.string());
       }
     }
 
