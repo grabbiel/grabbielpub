@@ -108,6 +108,7 @@ parse_metadata(const fs::path &metadata_path) {
   return metadata;
 }
 
+// Store file reference in database
 bool store_file_reference(int content_id, const std::string &filename,
                           const std::string &gcs_path) {
   sqlite3 *db;
@@ -254,8 +255,6 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
     return false;
   }
 }
-
-// Store file reference in database
 
 // Inserts or updates content_blocks and articles
 bool update_article_metadata(
