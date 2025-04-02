@@ -153,7 +153,7 @@ void rewrite_media_references(
     bool modified = false;
     for (const auto &[local_name, gcs_url] : media_map) {
       // Match src="media/photo.jpg", url('media/photo.jpg'), etc.
-      std::regex pattern(R"(media/)" + regex_escape(local_name));
+      std::regex pattern(regex_escape(local_name));
       std::string replacement = "$1" + gcs_url;
       std::string new_content =
           std::regex_replace(content, pattern, replacement);
