@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <regex>
 #include <sqlite3.h>
 #include <sstream>
 #include <string>
@@ -121,8 +122,63 @@ parse_metadata(const fs::path &metadata_path) {
   return metadata;
 }
 
-// Store file reference in database
+std::string regex_escape(const std::string &s) {
+  static const std::regex esc{R"([-[\]{}()*+?.,\^$|#\s])"};
+  return std::regex_replace(s, esc, R"(\$&)");
+}
 
+// Rewrites references like "media/photo.jpg" to their full GCS URL
+void rewrite_media_references(
+    const fs::path &article_dir,
+    const std::unordered_map<std::string, std::string> &media_map) {
+  std::vector<std::string> target_files = {"index.html", "script.js",
+                                           "style.css"};
+
+  for (const auto &filename : target_files) {
+    fs::path file_path = article_dir / filename;
+    if (!fs::exists(file_path))
+      continue;
+
+    std::ifstream in(file_path);
+    if (!in) {
+      std::cerr << "[rewrite] Failed to open " << file_path << " for reading\n";
+      continue;
+    }
+
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    in.close();
+    std::string content = buffer.str();
+
+    bool modified = false;
+    for (const auto &[local_name, gcs_url] : media_map) {
+      // Match src="media/photo.jpg", url('media/photo.jpg'), etc.
+      std::regex pattern("(src=|href=|url\\(['\"]?)media/" +
+                         regex_escape(local_name));
+      std::string replacement = "$1" + gcs_url;
+      std::string new_content =
+          std::regex_replace(content, pattern, replacement);
+      if (new_content != content) {
+        content = new_content;
+        modified = true;
+      }
+    }
+
+    if (modified) {
+      std::ofstream out(file_path);
+      if (!out) {
+        std::cerr << "[rewrite] Failed to open " << file_path
+                  << " for writing\n";
+        continue;
+      }
+      out << content;
+      std::cout << "[rewrite] Rewrote media references in: " << file_path
+                << "\n";
+    }
+  }
+}
+
+// Store file reference in database
 bool store_file_reference(int content_id, const std::string &file_type,
                           const std::string &file_path) {
   sqlite3 *db;
@@ -166,10 +222,64 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
               " for content ID " + std::to_string(content_id));
   fs::path local_dest = STORAGE_ROOT + std::to_string(content_id);
 
+  std::unordered_map<std::string, std::string> media_url_map;
+
   try {
     fs::create_directories(local_dest);
     log_to_file("Created local directory: " + local_dest.string());
 
+    for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
+      if (entry.is_directory())
+        continue;
+      if (entry.path().filename() == "metadata.txt")
+        continue;
+
+      fs::path rel_path = fs::relative(entry.path(), article_dir);
+      std::string ext = entry.path().extension().string();
+      std::string file_type;
+      if (!ext.empty())
+        file_type = ext.substr(1);
+      else
+        file_type = "bin";
+
+      if (VM_ALLOWED.count(file_type)) {
+        // Defer copying until after we rewrite HTML/JS/CSS
+        continue;
+      }
+
+      std::string category;
+      if (IMAGE_EXTENSIONS.count(ext)) {
+        category = "images/originals/";
+      } else if (VIDEO_EXTENSIONS.count(ext)) {
+        category = "videos/originals/";
+      } else {
+        log_to_file("Unsupported media type skipped: " + entry.path().string());
+        continue;
+      }
+
+      std::string random_name = generate_uuid() + ext;
+      std::string gcs_key = category + random_name;
+      std::string tmp_path = "/tmp/" + random_name;
+      fs::copy_file(entry.path(), tmp_path,
+                    fs::copy_options::overwrite_existing);
+
+      std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
+                        GCS_PUBLIC_BUCKET + "/" + gcs_key;
+      log_to_file("Uploading media file to GCS: " + cmd);
+      std::string result = exec_command(cmd);
+      log_to_file("GCS upload result: " + result);
+
+      fs::remove(tmp_path);
+
+      std::string gcs_url = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
+      media_url_map[entry.path().filename().string()] = gcs_url;
+      store_file_reference(content_id, file_type, gcs_url);
+    }
+
+    // 🧠 Patch references in-place before saving static files
+    rewrite_media_references(article_dir, media_url_map);
+
+    // ⬇️ Now copy HTML/JS/CSS files AFTER they were patched
     for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
       if (entry.is_directory())
         continue;
@@ -190,35 +300,6 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
         fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing);
         store_file_reference(content_id, file_type, rel_path.string());
         log_to_file("Copied local-only file: " + rel_path.string());
-      } else {
-        std::string category;
-        if (IMAGE_EXTENSIONS.count(ext)) {
-          category = "images/originals/";
-        } else if (VIDEO_EXTENSIONS.count(ext)) {
-          category = "videos/originals/";
-        } else {
-          log_to_file("Unsupported media type skipped: " +
-                      entry.path().string());
-          continue;
-        }
-
-        std::string random_name = generate_uuid() + ext;
-        std::string gcs_key = category + random_name;
-        std::string tmp_path = "/tmp/" + random_name;
-        fs::copy_file(entry.path(), tmp_path,
-                      fs::copy_options::overwrite_existing);
-
-        std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
-                          GCS_PUBLIC_BUCKET + "/" + gcs_key;
-        log_to_file("Uploading media file to GCS: " + cmd);
-        std::string result = exec_command(cmd);
-        log_to_file("GCS upload result: " + result);
-
-        fs::remove(tmp_path);
-
-        std::string gcs_url =
-            GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
-        store_file_reference(content_id, file_type, gcs_url);
       }
     }
 
