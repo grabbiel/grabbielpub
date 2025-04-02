@@ -18,8 +18,11 @@ const std::string STORAGE_ROOT = "/var/lib/article-content/";
 const std::string GCS_PUBLIC_BUCKET = "grabbiel-media-public";
 const std::string GCS_PUBLIC_URL = "https://storage.googleapis.com/";
 const std::string LOG_FILE = "/tmp/article-publisher.log";
-
 const std::unordered_set<std::string> VM_ALLOWED = {"html", "css", "js"};
+const std::unordered_set<std::string> IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp", ".tiff"};
+const std::unordered_set<std::string> VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".webm", ".avi", ".mkv"};
 const std::vector<std::string> REQUIRED_FILES = {"index.html", "style.css",
                                                  "script.js"};
 
