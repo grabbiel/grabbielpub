@@ -59,6 +59,10 @@ std::string exec_command(const std::string &cmd) {
 // Upload a file to GCS (adapted from media_manager.cpp)
 bool upload_to_gcs(const std::string &local_path, const std::string &gcs_path,
                    bool public_access = false) {
+  // Use the same environment variable that's set in systemd service
+  // This will respect the GOOGLE_APPLICATION_CREDENTIALS environment variable
+  // which points to the same key used by media_manager
+
   std::string cmd = "sudo gsutil cp " + local_path + " " + gcs_path;
   std::string result = exec_command(cmd);
 

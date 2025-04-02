@@ -32,14 +32,28 @@ jobs:
           echo "[*] Creating necessary directories on VM..."
           ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP '
             sudo mkdir -p /usr/local/bin
-            sudo mkdir -p /etc/grabbiel
+            sudo mkdir -p /var/lib/article-content
+            sudo chmod 755 /var/lib/article-content
             sudo rm -rf /tmp/article-publisher
             mkdir -p /tmp/article-publisher
           '
 
-          echo "[*] Setting up GCS service account key..."
-          echo "$GCP_SERVICE_ACCOUNT_KEY" | ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP 'sudo tee /etc/grabbiel/gcs-key.json > /dev/null'
-          ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP 'sudo chmod 600 /etc/grabbiel/gcs-key.json'
+          echo "[*] Verifying GCS service account key exists..."
+          ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP '
+            if [ ! -f /etc/google-cloud-keys/grabbiel-media-key.json ]; then
+              echo "Creating directory for GCS key..."
+              sudo mkdir -p /etc/google-cloud-keys
+              if [ -n "$GCP_SERVICE_ACCOUNT_KEY" ]; then
+                echo "$GCP_SERVICE_ACCOUNT_KEY" | sudo tee /etc/google-cloud-keys/grabbiel-media-key.json > /dev/null
+                sudo chmod 600 /etc/google-cloud-keys/grabbiel-media-key.json
+                echo "GCS service account key created."
+              else
+                echo "WARNING: GCP_SERVICE_ACCOUNT_KEY is empty. GCS integration may not work properly."
+              fi
+            else
+              echo "Using existing GCS service account key."
+            fi
+          '
 
           echo "[*] Transferring files..."
           scp -i ~/.ssh/id_rsa src/* $VM_USER@$VM_IP:/tmp/article-publisher/
@@ -50,6 +64,18 @@ jobs:
           ssh -i ~/.ssh/id_rsa $VM_USER@$VM_IP '
             sudo apt-get update
             sudo apt-get install -y g++ libsqlite3-dev
+
+            # Check if Google Cloud SDK is installed
+            if ! command -v gsutil &> /dev/null; then
+              echo "Installing Google Cloud SDK..."
+              # Import the Google Cloud public key
+              curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+              
+              # Add the Cloud SDK distribution URI as a package source
+              echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+              
+              sudo apt-get update && sudo apt-get install -y google-cloud-sdk
+            fi
 
             sudo mv /tmp/article-publisher.service /etc/systemd/system/
             bash /tmp/build_article_publisher.sh

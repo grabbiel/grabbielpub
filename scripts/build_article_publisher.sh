@@ -22,17 +22,13 @@ else
   echo "[+] gsutil is already installed"
 fi
 
-echo "[*] Setting up GCS authentication..."
+echo "[*] Verifying GCS authentication..."
 # Check if service account key exists
-if [ ! -f /etc/grabbiel/gcs-key.json ]; then
-  echo "[!] GCS service account key not found at /etc/grabbiel/gcs-key.json"
-  echo "[!] Please ensure your deployment script sets up proper authentication"
+if [ ! -f /etc/google-cloud-keys/grabbiel-media-key.json ]; then
+  echo "[!] GCS service account key not found at /etc/google-cloud-keys/grabbiel-media-key.json"
+  echo "[!] GCS integration may not work properly"
 else
-  # Activate service account
-  sudo mkdir -p /root/.config/gcloud
-  sudo gcloud auth activate-service-account --key-file=/etc/grabbiel/gcs-key.json
-
-  echo "[+] GCS authentication configured"
+  echo "[+] GCS authentication key found"
 fi
 
 echo "[*] Compiling to $BUILD_PATH..."

@@ -3,6 +3,7 @@ Description=Article Publisher Service
 After=network.target
 
 [Service]
+Environment="GOOGLE_APPLICATION_CREDENTIALS=/etc/google-cloud-keys/grabbiel-media-key.json"
 ExecStart=/usr/local/bin/article_publisher
 WorkingDirectory=/usr/local/bin
 Restart=always
