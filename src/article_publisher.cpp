@@ -1,4 +1,4 @@
-#include "http_server.hpp" // Reuse from media_manager
+#include "http_server.hpp"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -8,16 +8,20 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
 const std::string DB_PATH = "/var/lib/grabbiel-db/content.db";
 const std::string STORAGE_ROOT = "/var/lib/article-content/";
-const std::string GCS_BUCKET = "gs://grabbiel-media";
-const std::string GCS_PUBLIC_BUCKET = "gs://grabbiel-media-public";
+const std::string GCS_PUBLIC_BUCKET = "grabbiel-media-public";
+const std::string GCS_PUBLIC_URL = "https://storage.googleapis.com/";
 const std::string LOG_FILE = "/tmp/article-publisher.log";
 
-// Logging functions (adapted from media_manager.cpp)
+const std::unordered_set<std::string> VM_ALLOWED = {"html", "css", "js"};
+const std::vector<std::string> REQUIRED_FILES = {"index.html", "style.css",
+                                                 "script.js"};
+
 void log_to_file(const std::string &message) {
   std::ofstream log_file(LOG_FILE, std::ios::app);
   if (log_file) {
@@ -28,7 +32,18 @@ void log_to_file(const std::string &message) {
   }
 }
 
-// Execute a shell command and get output (adapted from media_manager.cpp)
+bool validate_article_structure(const fs::path &article_dir) {
+  for (const auto &filename : REQUIRED_FILES) {
+    fs::path full_path = article_dir / filename;
+    if (!fs::exists(full_path)) {
+      log_to_file("Validation failed: missing required file " + filename);
+      return false;
+    }
+  }
+  log_to_file("Validation passed: all required files present");
+  return true;
+}
+
 std::string exec_command(const std::string &cmd) {
   std::string result;
   char buffer[128];
@@ -91,6 +106,7 @@ parse_metadata(const fs::path &metadata_path) {
 }
 
 // Store file reference in database
+
 bool store_file_reference(int content_id, const std::string &file_type,
                           const std::string &file_path) {
   sqlite3 *db;
@@ -100,7 +116,6 @@ bool store_file_reference(int content_id, const std::string &file_type,
     return false;
   }
 
-  // Insert file reference
   sqlite3_stmt *stmt;
   const char *sql = "INSERT INTO content_files (content_id, file_type, "
                     "file_path, is_main) VALUES (?, ?, ?, 0);";
@@ -141,130 +156,88 @@ bool recursive_upload(const fs::path &dir_path, int content_id) {
   }
 
   std::string gcs_content_path =
-      "gs://grabbiel-media-public/articles/" + std::to_string(content_id);
+      "gs://" + GCS_PUBLIC_BUCKET + "/articles/" + std::to_string(content_id);
 
   script_file << "#!/bin/bash\n";
-  script_file << "# Script to upload article files to GCS\n";
   script_file << "set -e\n\n";
   script_file << "cd " << dir_path.string() << "\n\n";
-
-  script_file << "# Upload image files recursively\n";
   script_file << "echo 'Uploading files...'\n";
   script_file
       << "find . -type f | grep -v 'metadata.txt' | while read -r file; do\n";
   script_file << "  echo \"Uploading $file...\"\n";
-
-  // Strip leading './' from the file path
   script_file << "  clean_path=${file#./}\n";
   script_file << "  dest_path=\"" << gcs_content_path << "/$clean_path\"\n";
   script_file << "  gsutil cp \"$file\" \"$dest_path\"\n";
   script_file << "done\n\n";
-
-  // List all files to verify upload
-  script_file << "# List all uploaded files\n";
   script_file << "echo 'Listing all uploaded files:'\n";
   script_file << "gsutil ls -r \"" << gcs_content_path << "/\"\n";
 
   script_file.close();
-
-  // Make script executable
   std::string chmod_cmd = "chmod +x " + script_path;
   system(chmod_cmd.c_str());
 
-  // Execute the script
   log_to_file("Running GCS upload script: " + script_path);
   std::string exec_cmd = "bash " + script_path + " 2>&1";
   std::string result = exec_command(exec_cmd);
   log_to_file("GCS upload script output: " + result);
 
-  // Clean up
   std::string rm_cmd = "rm " + script_path;
   system(rm_cmd.c_str());
 
-  // Check if upload was successful
-  std::string verify_cmd = "gsutil ls " + gcs_content_path + " 2>/dev/null";
+  std::string verify_cmd = "gsutil ls gs://" + GCS_PUBLIC_BUCKET +
+                           "/articles/" + std::to_string(content_id) +
+                           " 2>/dev/null";
   std::string verify_result = exec_command(verify_cmd);
 
-  if (!verify_result.empty()) {
-    log_to_file("Verified uploads to " + gcs_content_path);
-    return true;
-  } else {
-    log_to_file("Failed to verify uploads to " + gcs_content_path);
-    return false;
-  }
+  return !verify_result.empty();
 }
 
 // Copies article files to both local storage and GCS
 bool store_article_files(const fs::path &article_dir, int content_id) {
   log_to_file("Storing article files from " + article_dir.string() +
               " for content ID " + std::to_string(content_id));
-
-  // Setup local storage path
   fs::path local_dest = STORAGE_ROOT + std::to_string(content_id);
 
   try {
-    // Create local directory
     fs::create_directories(local_dest);
     log_to_file("Created local directory: " + local_dest.string());
 
-    // Track if we have any files to copy
-    bool has_files = false;
-
-    // Copy files to local storage
     for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
       if (entry.is_directory()) {
-        // Create the directory in the destination
         fs::path rel_path = fs::relative(entry.path(), article_dir);
-        fs::path dest_dir = local_dest / rel_path;
-        fs::create_directories(dest_dir);
-        log_to_file("Created directory: " + dest_dir.string());
+        fs::create_directories(local_dest / rel_path);
         continue;
       }
 
-      // Skip metadata.txt
-      if (entry.path().filename() == "metadata.txt") {
+      if (entry.path().filename() == "metadata.txt")
         continue;
-      }
 
-      has_files = true;
       fs::path rel_path = fs::relative(entry.path(), article_dir);
-      fs::path dest_path = local_dest / rel_path;
-
-      // Create parent directories if they don't exist
-      fs::create_directories(dest_path.parent_path());
-
-      // Copy the file
-      log_to_file("Copying file: " + entry.path().string() + " to " +
-                  dest_path.string());
-      fs::copy_file(entry.path(), dest_path,
-                    fs::copy_options::overwrite_existing);
-      log_to_file("Copied to local path: " + dest_path.string());
-
-      // Extract file type (extension without dot)
       std::string file_type = entry.path().extension().string();
-      if (!file_type.empty()) {
-        file_type = file_type.substr(1); // Remove leading dot
-      } else {
+      if (!file_type.empty())
+        file_type = file_type.substr(1);
+      else
         file_type = "bin";
+
+      std::string dest_path;
+      if (VM_ALLOWED.count(file_type)) {
+        fs::path dest = local_dest / rel_path;
+        fs::create_directories(dest.parent_path());
+        fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing);
+        dest_path = rel_path.string();
+      } else {
+        dest_path = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/articles/" +
+                    std::to_string(content_id) + "/" + rel_path.string();
       }
 
-      // Store file reference in database
-      log_to_file("Storing reference in database: " + rel_path.string() +
-                  " with type: " + file_type);
-      store_file_reference(content_id, file_type, rel_path.string());
+      store_file_reference(content_id, file_type, dest_path);
     }
 
-    if (!has_files) {
-      log_to_file("No files to copy in article directory");
-      return true;
-    }
-
-    // Upload to GCS
     bool gcs_success = recursive_upload(article_dir, content_id);
     log_to_file("GCS upload " +
                 std::string(gcs_success ? "successful" : "failed"));
-
     return true;
+
   } catch (const std::exception &e) {
     log_to_file("Error storing article files: " + std::string(e.what()));
     return false;
@@ -430,26 +403,22 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
     log_to_file("[Query] " + pair.first + ": " + pair.second);
   }
 
-  // First try to get path from query parameters
+  // Determine article path
   auto it = req.query_params.find("path");
   if (it != req.query_params.end()) {
     article_path = it->second;
     log_to_file("Using path from query parameter: " + article_path);
-  }
-  // If not found in query params, try using the request body
-  else if (!req.body.empty()) {
+  } else if (!req.body.empty()) {
     article_path = req.body;
     log_to_file("Using path from request body: " + article_path);
-  }
-  // If neither is available, return an error
-  else {
+  } else {
     log_to_file("No path provided in query parameters or request body");
     res.send(400, "Missing path parameter. Provide it either as a query "
                   "parameter '?path=' or in the request body.");
     return;
   }
 
-  // Check if the article path exists
+  // Validate metadata.txt exists
   fs::path meta_file = fs::path(article_path) / "metadata.txt";
   if (!fs::exists(meta_file)) {
     log_to_file("Metadata file not found at: " + meta_file.string());
@@ -457,18 +426,23 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
     return;
   }
 
-  // Parse metadata
+  // ✅ Validate required article files
+  if (!validate_article_structure(article_path)) {
+    res.send(400, "Article is missing required files (e.g., index.html, "
+                  "style.css, script.js)");
+    return;
+  }
+
+  // Proceed with metadata parsing and database update
   auto metadata = parse_metadata(meta_file);
   int content_id = -1;
 
-  // Update database with metadata
   if (!update_article_metadata(metadata, content_id)) {
     log_to_file("Database update failed for article at: " + article_path);
     res.send(500, "Database update failed");
     return;
   }
 
-  // Store files (local & GCS)
   if (!store_article_files(article_path, content_id)) {
     log_to_file("File storage failed for article at: " + article_path);
     res.send(500, "File storage failed");
