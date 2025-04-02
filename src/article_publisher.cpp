@@ -174,9 +174,10 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
         continue;
 
       fs::path rel_path = fs::relative(entry.path(), article_dir);
-      std::string file_type = entry.path().extension().string();
-      if (!file_type.empty())
-        file_type = file_type.substr(1);
+      std::string ext = entry.path().extension().string();
+      std::string file_type;
+      if (!ext.empty())
+        file_type = ext.substr(1);
       else
         file_type = "bin";
 
@@ -187,19 +188,33 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
         store_file_reference(content_id, file_type, rel_path.string());
         log_to_file("Copied local-only file: " + rel_path.string());
       } else {
-        std::string random_name =
-            generate_uuid() + entry.path().extension().string();
+        std::string category;
+        if (IMAGE_EXTENSIONS.count(ext)) {
+          category = "images/originals/";
+        } else if (VIDEO_EXTENSIONS.count(ext)) {
+          category = "videos/originals/";
+        } else {
+          log_to_file("Unsupported media type skipped: " +
+                      entry.path().string());
+          continue;
+        }
+
+        std::string random_name = generate_uuid() + ext;
+        std::string gcs_key = category + random_name;
         std::string tmp_path = "/tmp/" + random_name;
         fs::copy_file(entry.path(), tmp_path,
                       fs::copy_options::overwrite_existing);
+
         std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
-                          GCS_PUBLIC_BUCKET + "/" + random_name;
+                          GCS_PUBLIC_BUCKET + "/" + gcs_key;
         log_to_file("Uploading media file to GCS: " + cmd);
         std::string result = exec_command(cmd);
         log_to_file("GCS upload result: " + result);
+
         fs::remove(tmp_path);
+
         std::string gcs_url =
-            GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + random_name;
+            GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
         store_file_reference(content_id, file_type, gcs_url);
       }
     }
