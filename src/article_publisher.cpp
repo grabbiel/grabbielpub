@@ -158,7 +158,7 @@ void rewrite_media_references(
 
     // 🖼️ Replace all media/xxx with their full GCS URL
     for (const auto &[local_path, gcs_url] : media_map) {
-      std::regex pattern(R"(media/)" + regex_escape(local_path));
+      std::regex pattern(regex_escape(local_path));
       std::string new_content = std::regex_replace(content, pattern, gcs_url);
       if (new_content != content) {
         content = new_content;
