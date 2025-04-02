@@ -153,8 +153,7 @@ void rewrite_media_references(
     bool modified = false;
     for (const auto &[local_name, gcs_url] : media_map) {
       // Match src="media/photo.jpg", url('media/photo.jpg'), etc.
-      std::regex pattern("(src=|href=|url\\(['\"]?)media/" +
-                         regex_escape(local_name));
+      std::regex pattern(R"(media/)" + regex_escape(local_name));
       std::string replacement = "$1" + gcs_url;
       std::string new_content =
           std::regex_replace(content, pattern, replacement);
@@ -272,7 +271,7 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
       fs::remove(tmp_path);
 
       std::string gcs_url = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
-      media_url_map[entry.path().filename().string()] = gcs_url;
+      media_url_map["media/" + entry.path().filename().string()] = gcs_url;
       store_file_reference(content_id, file_type, gcs_url);
     }
 
