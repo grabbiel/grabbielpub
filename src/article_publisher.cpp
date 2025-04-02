@@ -153,7 +153,10 @@ bool recursive_upload(const fs::path &dir_path, int content_id) {
   script_file
       << "find . -type f | grep -v 'metadata.txt' | while read -r file; do\n";
   script_file << "  echo \"Uploading $file...\"\n";
-  script_file << "  dest_path=\"" << gcs_content_path << "/$file\"\n";
+
+  // Strip leading './' from the file path
+  script_file << "  clean_path=${file#./}\n";
+  script_file << "  dest_path=\"" << gcs_content_path << "/$clean_path\"\n";
   script_file << "  gsutil cp \"$file\" \"$dest_path\"\n";
   script_file << "done\n\n";
 
