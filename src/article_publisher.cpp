@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <sqlite3.h>
 #include <sstream>
 #include <string>
@@ -30,6 +31,18 @@ void log_to_file(const std::string &message) {
   } else {
     std::cerr << "Failed to open log file: " << LOG_FILE << std::endl;
   }
+}
+
+std::string generate_uuid() {
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  static std::uniform_int_distribution<> dis(0, 15);
+  const char *hex = "0123456789abcdef";
+  std::string uuid;
+  for (int i = 0; i < 32; ++i) {
+    uuid += hex[dis(gen)];
+  }
+  return uuid;
 }
 
 bool validate_article_structure(const fs::path &article_dir) {
@@ -144,54 +157,6 @@ bool store_file_reference(int content_id, const std::string &file_type,
   return true;
 }
 
-// Function to recursively upload files to GCS - simplified version
-bool recursive_upload(const fs::path &dir_path, int content_id) {
-  std::string script_path =
-      "/tmp/gcs_upload_" + std::to_string(content_id) + ".sh";
-  std::ofstream script_file(script_path);
-
-  if (!script_file) {
-    log_to_file("Failed to create GCS upload script at " + script_path);
-    return false;
-  }
-
-  std::string gcs_content_path =
-      "gs://" + GCS_PUBLIC_BUCKET + "/articles/" + std::to_string(content_id);
-
-  script_file << "#!/bin/bash\n";
-  script_file << "set -e\n\n";
-  script_file << "cd " << dir_path.string() << "\n\n";
-  script_file << "echo 'Uploading files...'\n";
-  script_file
-      << "find . -type f | grep -v 'metadata.txt' | while read -r file; do\n";
-  script_file << "  echo \"Uploading $file...\"\n";
-  script_file << "  clean_path=${file#./}\n";
-  script_file << "  dest_path=\"" << gcs_content_path << "/$clean_path\"\n";
-  script_file << "  gsutil cp \"$file\" \"$dest_path\"\n";
-  script_file << "done\n\n";
-  script_file << "echo 'Listing all uploaded files:'\n";
-  script_file << "gsutil ls -r \"" << gcs_content_path << "/\"\n";
-
-  script_file.close();
-  std::string chmod_cmd = "chmod +x " + script_path;
-  system(chmod_cmd.c_str());
-
-  log_to_file("Running GCS upload script: " + script_path);
-  std::string exec_cmd = "bash " + script_path + " 2>&1";
-  std::string result = exec_command(exec_cmd);
-  log_to_file("GCS upload script output: " + result);
-
-  std::string rm_cmd = "rm " + script_path;
-  system(rm_cmd.c_str());
-
-  std::string verify_cmd = "gsutil ls gs://" + GCS_PUBLIC_BUCKET +
-                           "/articles/" + std::to_string(content_id) +
-                           " 2>/dev/null";
-  std::string verify_result = exec_command(verify_cmd);
-
-  return !verify_result.empty();
-}
-
 // Copies article files to both local storage and GCS
 bool store_article_files(const fs::path &article_dir, int content_id) {
   log_to_file("Storing article files from " + article_dir.string() +
@@ -203,12 +168,8 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
     log_to_file("Created local directory: " + local_dest.string());
 
     for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
-      if (entry.is_directory()) {
-        fs::path rel_path = fs::relative(entry.path(), article_dir);
-        fs::create_directories(local_dest / rel_path);
+      if (entry.is_directory())
         continue;
-      }
-
       if (entry.path().filename() == "metadata.txt")
         continue;
 
@@ -219,23 +180,30 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
       else
         file_type = "bin";
 
-      std::string dest_path;
       if (VM_ALLOWED.count(file_type)) {
         fs::path dest = local_dest / rel_path;
         fs::create_directories(dest.parent_path());
         fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing);
-        dest_path = rel_path.string();
+        store_file_reference(content_id, file_type, rel_path.string());
+        log_to_file("Copied local-only file: " + rel_path.string());
       } else {
-        dest_path = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/articles/" +
-                    std::to_string(content_id) + "/" + rel_path.string();
+        std::string random_name =
+            generate_uuid() + entry.path().extension().string();
+        std::string tmp_path = "/tmp/" + random_name;
+        fs::copy_file(entry.path(), tmp_path,
+                      fs::copy_options::overwrite_existing);
+        std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
+                          GCS_PUBLIC_BUCKET + "/" + random_name;
+        log_to_file("Uploading media file to GCS: " + cmd);
+        std::string result = exec_command(cmd);
+        log_to_file("GCS upload result: " + result);
+        fs::remove(tmp_path);
+        std::string gcs_url =
+            GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + random_name;
+        store_file_reference(content_id, file_type, gcs_url);
       }
-
-      store_file_reference(content_id, file_type, dest_path);
     }
 
-    bool gcs_success = recursive_upload(article_dir, content_id);
-    log_to_file("GCS upload " +
-                std::string(gcs_success ? "successful" : "failed"));
     return true;
 
   } catch (const std::exception &e) {
