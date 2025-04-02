@@ -130,9 +130,13 @@ std::string regex_escape(const std::string &s) {
 // Rewrites references like "media/photo.jpg" to their full GCS URL
 void rewrite_media_references(
     const fs::path &article_dir,
-    const std::unordered_map<std::string, std::string> &media_map) {
+    const std::unordered_map<std::string, std::string> &media_map,
+    int content_id) {
+
   std::vector<std::string> target_files = {"index.html", "script.js",
                                            "style.css"};
+  std::string base_url =
+      "https://server.grabbiel.com/article/" + std::to_string(content_id) + "/";
 
   for (const auto &filename : target_files) {
     fs::path file_path = article_dir / filename;
@@ -141,8 +145,7 @@ void rewrite_media_references(
 
     std::ifstream in(file_path);
     if (!in) {
-      log_to_file("[rewrite] ❌ Failed to open for reading: " +
-                  file_path.string());
+      std::cerr << "[rewrite] Failed to open " << file_path << " for reading\n";
       continue;
     }
 
@@ -152,29 +155,47 @@ void rewrite_media_references(
     std::string content = buffer.str();
 
     bool modified = false;
-    for (const auto &[local_name, gcs_url] : media_map) {
-      // Match src="media/photo.jpg", url('media/photo.jpg'), etc.
-      std::regex pattern(regex_escape(local_name));
-      std::string replacement = "$1" + gcs_url;
-      std::string new_content =
-          std::regex_replace(content, pattern, replacement);
+
+    // 🖼️ Replace all media/xxx with their full GCS URL
+    for (const auto &[local_path, gcs_url] : media_map) {
+      std::regex pattern(R"(media/)" + regex_escape(local_path));
+      std::string new_content = std::regex_replace(content, pattern, gcs_url);
       if (new_content != content) {
         content = new_content;
         modified = true;
-        log_to_file("[rewrite] ✅ Replaced: media/" + local_name + " → " +
-                    gcs_url);
+      }
+    }
+
+    // 📄 Replace local script and style references with article URL-based ones
+    if (filename == "index.html") {
+      std::regex css_pattern(R"(href\s*=\s*["']style\.css["'])");
+      std::regex js_pattern(R"(src\s*=\s*["']script\.js["'])");
+
+      std::string new_content = std::regex_replace(
+          content, css_pattern, "href=\"" + base_url + "style.css\"");
+      if (new_content != content) {
+        content = new_content;
+        modified = true;
+      }
+
+      new_content = std::regex_replace(content, js_pattern,
+                                       "src=\"" + base_url + "script.js\"");
+      if (new_content != content) {
+        content = new_content;
+        modified = true;
       }
     }
 
     if (modified) {
       std::ofstream out(file_path);
       if (!out) {
-        log_to_file("[rewrite] ❌ Failed to open for writing: " +
-                    file_path.string());
+        std::cerr << "[rewrite] Failed to open " << file_path
+                  << " for writing\n";
         continue;
       }
       out << content;
-      log_to_file("[rewrite] 📝 Patched file: " + file_path.string());
+      std::cout << "[rewrite] Rewrote media references in: " << file_path
+                << "\n";
     }
   }
 }
@@ -278,7 +299,7 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
     }
 
     // 🧠 Patch references in-place before saving static files
-    rewrite_media_references(article_dir, media_url_map);
+    rewrite_media_references(article_dir, media_url_map, content_id);
 
     // ⬇️ Now copy HTML/JS/CSS files AFTER they were patched
     for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
