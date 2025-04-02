@@ -6,6 +6,87 @@
 
 #include <cstring>
 #include <iostream>
+#include <sstream>
+
+// Parse query string from URL
+void parse_query_string(HttpRequest &req, const std::string &query_string) {
+  std::string key, value;
+  bool parsing_key = true;
+  for (char c : query_string) {
+    if (c == '=') {
+      parsing_key = false;
+    } else if (c == '&') {
+      if (!key.empty()) {
+        req.query_params[key] = value;
+      }
+      key.clear();
+      value.clear();
+      parsing_key = true;
+    } else {
+      if (parsing_key) {
+        key += c;
+      } else {
+        value += c;
+      }
+    }
+  }
+  if (!key.empty()) {
+    req.query_params[key] = value;
+  }
+}
+
+// Parse HTTP request headers and first line
+void parse_request(const std::string &request_str, HttpRequest &req) {
+  std::istringstream request_stream(request_str);
+  std::string line;
+
+  // Parse first line (GET /path?query HTTP/1.1)
+  if (std::getline(request_stream, line)) {
+    std::istringstream line_stream(line);
+    line_stream >> req.method;
+
+    std::string path_with_query;
+    line_stream >> path_with_query;
+
+    // Split path and query
+    size_t query_pos = path_with_query.find('?');
+    if (query_pos != std::string::npos) {
+      req.path = path_with_query.substr(0, query_pos);
+      std::string query = path_with_query.substr(query_pos + 1);
+      parse_query_string(req, query);
+    } else {
+      req.path = path_with_query;
+    }
+  }
+
+  // Parse headers
+  while (std::getline(request_stream, line) && !line.empty() && line != "\r") {
+    size_t colon_pos = line.find(':');
+    if (colon_pos != std::string::npos) {
+      std::string header_name = line.substr(0, colon_pos);
+      std::string header_value = line.substr(colon_pos + 1);
+
+      // Trim leading whitespace from header value
+      header_value.erase(0, header_value.find_first_not_of(" \t"));
+      // Trim trailing \r if present
+      if (!header_value.empty() && header_value.back() == '\r') {
+        header_value.pop_back();
+      }
+
+      req.headers[header_name] = header_value;
+    }
+  }
+
+  // For POST requests, extract body
+  if (req.method == "POST") {
+    // Find where the headers end and body begins
+    size_t body_start = request_str.find("\r\n\r\n");
+    if (body_start != std::string::npos) {
+      body_start += 4; // Move past \r\n\r\n
+      req.body = request_str.substr(body_start);
+    }
+  }
+}
 
 void HttpServer::run() {
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -22,11 +103,14 @@ void HttpServer::run() {
   address.sin_addr.s_addr = INADDR_ANY;
   address.sin_port = htons(port);
 
+  std::cout << "[*] Attempting to bind to 127.0.0.1:" << port << "..."
+            << std::endl;
   if (bind(server_fd, (sockaddr *)&address, sizeof(address)) < 0) {
     std::cerr << "Bind failed.\n";
     close(server_fd);
     return;
   }
+  std::cout << "[+] Successfully bound to port " << port << std::endl;
 
   if (listen(server_fd, 5) < 0) {
     std::cerr << "Listen failed.\n";
@@ -55,14 +139,21 @@ void HttpServer::run() {
     HttpRequest request;
     HttpResponse response;
 
-    request.method = "POST"; // Simplified for your service
-    request.path = "/publish";
-    request.body = std::string(buffer, bytes_read);
+    // Parse the HTTP request
+    std::string request_str(buffer, bytes_read);
+    parse_request(request_str, request);
 
-    if (handler) {
+    // Debug output
+    std::cout << "Received request: " << request.method << " " << request.path
+              << std::endl;
+    for (const auto &[key, value] : request.query_params) {
+      std::cout << "Query param: " << key << " = " << value << std::endl;
+    }
+
+    if (handler && request.path == "/publish") {
       handler(request, response);
     } else {
-      response.send(500, "No handler assigned.");
+      response.send(404, "Not Found");
     }
 
     std::string http_response =

@@ -111,14 +111,51 @@ bool update_article_metadata(
 }
 
 void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
-  const std::string article_path =
-      req.query_params.at("path"); // Path to the article directory
-  fs::path meta_file = fs::path(article_path) / "metadata.txt";
-  if (!fs::exists(meta_file)) {
-    res.send(400, "Missing metadata.txt");
+  std::string article_path;
+
+  // Log headers for debugging
+  std::cerr << "Request headers: " << std::endl;
+  for (const auto &pair : req.headers) {
+    std::cerr << "[Header] " << pair.first << ": " << pair.second << std::endl;
+  }
+
+  // Log query params
+  std::cerr << "Query parameters: " << std::endl;
+  for (const auto &pair : req.query_params) {
+    std::cerr << "[Query] " << pair.first << ": " << pair.second << std::endl;
+  }
+
+  // First try to get path from query parameters
+  auto it = req.query_params.find("path");
+  if (it != req.query_params.end()) {
+    article_path = it->second;
+    std::cerr << "Using path from query parameter: " << article_path
+              << std::endl;
+  }
+  // If not found in query params, try using the request body
+  else if (!req.body.empty()) {
+    article_path = req.body;
+    std::cerr << "Using path from request body: " << article_path << std::endl;
+  }
+  // If neither is available, return an error
+  else {
+    std::cerr << "No path provided in query parameters or request body"
+              << std::endl;
+    res.send(400, "Missing path parameter. Provide it either as a query "
+                  "parameter '?path=' or in the request body.");
     return;
   }
 
+  // Check if the article path exists
+  fs::path meta_file = fs::path(article_path) / "metadata.txt";
+  if (!fs::exists(meta_file)) {
+    std::cerr << "Metadata file not found at: " << meta_file.string()
+              << std::endl;
+    res.send(400, "Missing metadata.txt at path: " + article_path);
+    return;
+  }
+
+  // Rest of the function remains the same
   auto metadata = parse_metadata(meta_file);
   int content_id = -1;
   if (!update_article_metadata(metadata, content_id)) {
