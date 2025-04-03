@@ -527,10 +527,11 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
     return;
   }
 
-  // ✅ Validate required article files
-  if (!validate_article_structure(article_path)) {
-    res.send(400, "Article is missing required files (e.g., index.html, "
-                  "style.css, script.js)");
+  // ✅ Validate required article file: index.html only
+  fs::path index_file = fs::path(article_path) / "index.html";
+  if (!fs::exists(index_file)) {
+    log_to_file("Missing index.html at: " + index_file.string());
+    res.send(400, "Article is missing required file: index.html");
     return;
   }
 
