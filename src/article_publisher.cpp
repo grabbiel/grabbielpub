@@ -131,8 +131,15 @@ std::string regex_escape(const std::string &s) {
 void rewrite_media_references(
     const fs::path &article_dir,
     const std::unordered_map<std::string, std::string> &media_map,
-    int content_id) {
+    int content_id, bool is_published) {
 
+  // If content is a draft, we don't rewrite media references
+  if (!is_published) {
+    log_to_file("Content is draft - preserving original media references");
+    return;
+  }
+
+  log_to_file("Content is published - rewriting media references to GCS URLs");
   std::vector<std::string> target_files = {"index.html", "script.js",
                                            "style.css"};
   std::string base_url =
@@ -156,7 +163,8 @@ void rewrite_media_references(
 
     bool modified = false;
 
-    // 🖼️ Replace all media/xxx with their full GCS URL
+    // 🖼️ Replace all media/xxx with their full GCS URL, but only for published
+    // content
     for (const auto &[local_path, gcs_url] : media_map) {
       std::regex pattern(regex_escape(local_path));
       std::string new_content = std::regex_replace(content, pattern, gcs_url);
@@ -239,9 +247,11 @@ bool store_file_reference(int content_id, const std::string &file_type,
 }
 
 // Copies article files to both local storage and GCS
-bool store_article_files(const fs::path &article_dir, int content_id) {
+bool store_article_files(const fs::path &article_dir, int content_id,
+                         bool is_published) {
   log_to_file("Storing article files from " + article_dir.string() +
-              " for content ID " + std::to_string(content_id));
+              " for content ID " + std::to_string(content_id) +
+              " (Status: " + (is_published ? "published" : "draft") + ")");
   fs::path local_dest = STORAGE_ROOT + std::to_string(content_id);
 
   std::unordered_map<std::string, std::string> media_url_map;
@@ -265,43 +275,56 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
         file_type = "bin";
 
       if (VM_ALLOWED.count(file_type)) {
-        // Defer copying until after we rewrite HTML/JS/CSS
+        // Defer copying until after we potentially rewrite HTML/JS/CSS
         continue;
       }
 
+      // Determine media category
       std::string category;
+      bool is_media = false;
+
       if (IMAGE_EXTENSIONS.count(ext)) {
         category = "images/originals/";
+        is_media = true;
       } else if (VIDEO_EXTENSIONS.count(ext)) {
         category = "videos/originals/";
+        is_media = true;
       } else {
         log_to_file("Unsupported media type skipped: " + entry.path().string());
         continue;
       }
 
-      std::string random_name = generate_uuid() + ext;
-      std::string gcs_key = category + random_name;
-      std::string tmp_path = "/tmp/" + random_name;
-      fs::copy_file(entry.path(), tmp_path,
-                    fs::copy_options::overwrite_existing);
+      // If we're publishing, upload media to GCS
+      if (is_published && is_media) {
+        // Generate a unique name for the file
+        std::string random_name = generate_uuid() + ext;
+        std::string gcs_key = category + random_name;
+        std::string tmp_path = "/tmp/" + random_name;
+        fs::copy_file(entry.path(), tmp_path,
+                      fs::copy_options::overwrite_existing);
 
-      std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
-                        GCS_PUBLIC_BUCKET + "/" + gcs_key;
-      log_to_file("Uploading media file to GCS: " + cmd);
-      std::string result = exec_command(cmd);
-      log_to_file("GCS upload result: " + result);
+        std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
+                          GCS_PUBLIC_BUCKET + "/" + gcs_key;
+        log_to_file("Uploading media file to GCS: " + cmd);
+        std::string result = exec_command(cmd);
+        log_to_file("GCS upload result: " + result);
 
-      fs::remove(tmp_path);
+        fs::remove(tmp_path);
 
-      std::string gcs_url = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
-      media_url_map["media/" + entry.path().filename().string()] = gcs_url;
-      store_file_reference(content_id, file_type, gcs_url);
+        std::string gcs_url =
+            GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
+        media_url_map["media/" + entry.path().filename().string()] = gcs_url;
+        store_file_reference(content_id, file_type, gcs_url);
+      }
+      // For drafts, we leave media references as-is
     }
 
-    // 🧠 Patch references in-place before saving static files
-    rewrite_media_references(article_dir, media_url_map, content_id);
+    // 🧠 Patch references in-place before saving static files, but only for
+    // published content
+    rewrite_media_references(article_dir, media_url_map, content_id,
+                             is_published);
 
-    // ⬇️ Now copy HTML/JS/CSS files AFTER they were patched
+    // ⬇️ Now copy HTML/JS/CSS files AFTER they were potentially patched
     for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
       if (entry.is_directory())
         continue;
@@ -525,6 +548,7 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
   log_to_file("Received publish request");
 
   std::string article_path;
+  bool is_published = false;
 
   // Log headers for debugging
   log_to_file("Request headers:");
@@ -553,6 +577,15 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
     return;
   }
 
+  // Check publish status
+  auto status_it = req.query_params.find("status");
+  if (status_it != req.query_params.end() && status_it->second == "1") {
+    is_published = true;
+    log_to_file("Content will be published as PUBLISHED (status=1)");
+  } else {
+    log_to_file("Content will be published as DRAFT (status=0)");
+  }
+
   // Validate metadata.txt exists
   fs::path meta_file = fs::path(article_path) / "metadata.txt";
   if (!fs::exists(meta_file)) {
@@ -572,11 +605,9 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
   // Proceed with metadata parsing and database update
   auto metadata = parse_metadata(meta_file);
 
-  // Check if status parameter was provided in the query string
-  auto status_it = req.query_params.find("status");
+  // Add status from the query parameter to the metadata
   if (status_it != req.query_params.end()) {
     metadata["status"] = status_it->second;
-    log_to_file("Using status from query parameter: " + status_it->second);
   }
 
   int content_id = -1;
@@ -587,15 +618,18 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
     return;
   }
 
-  if (!store_article_files(article_path, content_id)) {
+  if (!store_article_files(article_path, content_id, is_published)) {
     log_to_file("File storage failed for article at: " + article_path);
     res.send(500, "File storage failed");
     return;
   }
 
-  log_to_file("Article published successfully with ID: " +
-              std::to_string(content_id));
-  res.send(200, "Article published with ID: " + std::to_string(content_id));
+  log_to_file("Article " +
+              std::string(is_published ? "published" : "saved as draft") +
+              " successfully with ID: " + std::to_string(content_id));
+  res.send(200, "Article " +
+                    std::string(is_published ? "published" : "saved as draft") +
+                    " with ID: " + std::to_string(content_id));
 }
 
 int main() {
