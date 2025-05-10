@@ -367,11 +367,19 @@ bool update_article_metadata(
   const std::string body_md = meta.at("body_markdown");
   const std::string site_id = meta.at("site_id");
 
+  // Get status if provided, default to "draft"
+  std::string status = "draft";
+  if (meta.find("status") != meta.end()) {
+    // Convert "0" to "draft" and "1" to "published"
+    status = (meta.at("status") == "1") ? "published" : "draft";
+  }
+
   // Print metadata for debugging
   log_to_file("Processing metadata:");
   log_to_file("  title: " + title);
   log_to_file("  slug: " + slug);
   log_to_file("  site_id: " + site_id);
+  log_to_file("  status: " + status);
   log_to_file("  body_md length: " + std::to_string(body_md.length()) +
               " chars");
 
@@ -403,11 +411,13 @@ bool update_article_metadata(
     log_to_file("Found existing content with ID: " +
                 std::to_string(content_id));
 
-    const char *update_sql =
+    // Update both the article and the content_block status
+    const char *update_article_sql =
         "UPDATE articles SET body_markdown = ?, last_edited = "
         "CURRENT_TIMESTAMP WHERE content_id = ?";
 
-    if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(db, update_article_sql, -1, &stmt, nullptr) !=
+        SQLITE_OK) {
       log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
       sqlite3_close(db);
       return false;
@@ -422,13 +432,36 @@ bool update_article_metadata(
       sqlite3_close(db);
       return false;
     }
+
+    sqlite3_finalize(stmt);
+
+    // Update the status in content_blocks
+    const char *update_status_sql =
+        "UPDATE content_blocks SET status = ? WHERE id = ?";
+
+    if (sqlite3_prepare_v2(db, update_status_sql, -1, &stmt, nullptr) !=
+        SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_close(db);
+      return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, content_id);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      return false;
+    }
   } else {
     sqlite3_finalize(stmt);
     log_to_file("Creating new content entry");
 
     const char *insert_cb_sql =
         "INSERT INTO content_blocks (title, url_slug, type_id, site_id, "
-        "language) VALUES (?, ?, 1, ?, 'en');";
+        "status, language) VALUES (?, ?, 1, ?, ?, 'en');";
 
     if (sqlite3_prepare_v2(db, insert_cb_sql, -1, &stmt, nullptr) !=
         SQLITE_OK) {
@@ -440,6 +473,7 @@ bool update_article_metadata(
     sqlite3_bind_text(stmt, 1, title.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, slug.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, site_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, status.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
@@ -537,6 +571,14 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
 
   // Proceed with metadata parsing and database update
   auto metadata = parse_metadata(meta_file);
+
+  // Check if status parameter was provided in the query string
+  auto status_it = req.query_params.find("status");
+  if (status_it != req.query_params.end()) {
+    metadata["status"] = status_it->second;
+    log_to_file("Using status from query parameter: " + status_it->second);
+  }
+
   int content_id = -1;
 
   if (!update_article_metadata(metadata, content_id)) {
