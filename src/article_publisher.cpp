@@ -37,30 +37,6 @@ void log_to_file(const std::string &message) {
   }
 }
 
-std::string generate_uuid() {
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  static std::uniform_int_distribution<> dis(0, 15);
-  const char *hex = "0123456789abcdef";
-  std::string uuid;
-  for (int i = 0; i < 32; ++i) {
-    uuid += hex[dis(gen)];
-  }
-  return uuid;
-}
-
-bool validate_article_structure(const fs::path &article_dir) {
-  for (const auto &filename : REQUIRED_FILES) {
-    fs::path full_path = article_dir / filename;
-    if (!fs::exists(full_path)) {
-      log_to_file("Validation failed: missing required file " + filename);
-      return false;
-    }
-  }
-  log_to_file("Validation passed: all required files present");
-  return true;
-}
-
 std::string exec_command(const std::string &cmd) {
   std::string result;
   char buffer[128];
@@ -86,6 +62,121 @@ std::string exec_command(const std::string &cmd) {
   }
 
   return result;
+}
+
+std::string generate_uuid() {
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  static std::uniform_int_distribution<> dis(0, 15);
+  const char *hex = "0123456789abcdef";
+  std::string uuid;
+  for (int i = 0; i < 32; ++i) {
+    uuid += hex[dis(gen)];
+  }
+  return uuid;
+}
+
+int generate_media_uuid(int content_id, const std::string &filename) {
+  std::string base = std::to_string(content_id) + "-" + filename;
+  std::hash<std::string> hasher;
+  size_t hash_value = hasher(base);
+  return static_cast<int>(hash_value % 2147483647);
+}
+
+bool extract_image_metadata(const fs::path &image_path, int &width, int &height,
+                            std::string &mime_type, int &size_bytes) {
+  try {
+    // Get file size
+    size_bytes = fs::file_size(image_path);
+
+    // Use ImageMagick to get dimensions and MIME type
+    std::string cmd =
+        "identify -format \"%w %h %m\" \"" + image_path.string() + "\"";
+    std::string result = exec_command(cmd);
+
+    // Parse the result
+    std::istringstream iss(result);
+    std::string format;
+    if (!(iss >> width >> height >> format)) {
+      log_to_file("Failed to parse image metadata: " + result);
+      return false;
+    }
+
+    // Map format to MIME type
+    static const std::unordered_map<std::string, std::string> format_to_mime = {
+        {"JPEG", "image/jpeg"}, {"JPG", "image/jpeg"},  {"PNG", "image/png"},
+        {"GIF", "image/gif"},   {"WEBP", "image/webp"}, {"HEIC", "image/heic"},
+        {"BMP", "image/bmp"},   {"TIFF", "image/tiff"}};
+
+    auto it = format_to_mime.find(format);
+    if (it != format_to_mime.end()) {
+      mime_type = it->second;
+    } else {
+      mime_type = "image/" + format;
+    }
+
+    return true;
+  } catch (const std::exception &e) {
+    log_to_file("Error extracting image metadata: " + std::string(e.what()));
+    return false;
+  }
+}
+
+bool extract_video_metadata(const fs::path &video_path, int &duration_seconds,
+                            std::string &mime_type, int &size_bytes) {
+  try {
+    // Get file size
+    size_bytes = fs::file_size(video_path);
+
+    // Use ffprobe to get duration
+    std::string cmd = "ffprobe -v error -show_entries format=duration -of "
+                      "default=noprint_wrappers=1:nokey=1 \"" +
+                      video_path.string() + "\"";
+    std::string result = exec_command(cmd);
+
+    // Parse the duration (might be a float in seconds)
+    float duration_float = 0;
+    std::istringstream iss(result);
+    if (!(iss >> duration_float)) {
+      log_to_file("Failed to parse video duration: " + result);
+      return false;
+    }
+
+    duration_seconds = static_cast<int>(duration_float);
+
+    // Map extension to MIME type
+    std::string ext = video_path.extension().string();
+    static const std::unordered_map<std::string, std::string> ext_to_mime = {
+        {".mp4", "video/mp4"},
+        {".mov", "video/quicktime"},
+        {".webm", "video/webm"},
+        {".avi", "video/x-msvideo"},
+        {".mkv", "video/x-matroska"}};
+
+    auto it = ext_to_mime.find(ext);
+    if (it != ext_to_mime.end()) {
+      mime_type = it->second;
+    } else {
+      mime_type = "video/mp4"; // Default to mp4
+    }
+
+    return true;
+  } catch (const std::exception &e) {
+    log_to_file("Error extracting video metadata: " + std::string(e.what()));
+    return false;
+  }
+}
+
+bool validate_article_structure(const fs::path &article_dir) {
+  for (const auto &filename : REQUIRED_FILES) {
+    fs::path full_path = article_dir / filename;
+    if (!fs::exists(full_path)) {
+      log_to_file("Validation failed: missing required file " + filename);
+      return false;
+    }
+  }
+  log_to_file("Validation passed: all required files present");
+  return true;
 }
 
 // Parses metadata.txt (simple key = value format)
@@ -125,6 +216,515 @@ parse_metadata(const fs::path &metadata_path) {
 std::string regex_escape(const std::string &s) {
   static const std::regex esc{R"([-[\]{}()*+?.,\^$|#\s])"};
   return std::regex_replace(s, esc, R"(\$&)");
+}
+
+std::string read_summary_file(const fs::path &article_dir) {
+  fs::path summary_path = article_dir / "summary.txt";
+  if (!fs::exists(summary_path)) {
+    log_to_file("Summary file not found, using empty summary");
+    return "";
+  }
+
+  std::ifstream infile(summary_path);
+  if (!infile.is_open()) {
+    log_to_file("Failed to open summary.txt");
+    return "";
+  }
+
+  std::stringstream buffer;
+  buffer << infile.rdbuf();
+  return buffer.str();
+}
+
+bool process_tags(int content_id, const std::string &tags_list) {
+  if (tags_list.empty()) {
+    return true; // No tags to process
+  }
+
+  sqlite3 *db;
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
+    log_to_file("Failed to open database: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
+
+  sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+
+  // Parse comma-separated list
+  std::stringstream ss(tags_list);
+  std::string tag;
+
+  while (std::getline(ss, tag, ',')) {
+    // Trim whitespace
+    tag.erase(0, tag.find_first_not_of(" \t"));
+    tag.erase(tag.find_last_not_of(" \t") + 1);
+
+    if (tag.empty())
+      continue;
+
+    // Check if tag exists, if not create it
+    int tag_id = -1;
+    sqlite3_stmt *stmt;
+    const char *select_sql = "SELECT id FROM tags WHERE name = ?";
+
+    if (sqlite3_prepare_v2(db, select_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      continue;
+    }
+
+    sqlite3_bind_text(stmt, 1, tag.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+      tag_id = sqlite3_column_int(stmt, 0);
+      sqlite3_finalize(stmt);
+    } else {
+      sqlite3_finalize(stmt);
+
+      // Insert new tag
+      const char *insert_sql = "INSERT INTO tags (name) VALUES (?)";
+      if (sqlite3_prepare_v2(db, insert_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+        continue;
+      }
+
+      sqlite3_bind_text(stmt, 1, tag.c_str(), -1, SQLITE_STATIC);
+
+      if (sqlite3_step(stmt) != SQLITE_DONE) {
+        log_to_file("Failed to insert tag: " + std::string(sqlite3_errmsg(db)));
+        sqlite3_finalize(stmt);
+        continue;
+      }
+
+      tag_id = (int)sqlite3_last_insert_rowid(db);
+      sqlite3_finalize(stmt);
+    }
+
+    // Associate tag with content
+    if (tag_id > 0) {
+      const char *insert_content_tag = "INSERT OR IGNORE INTO content_tags "
+                                       "(content_id, tag_id) VALUES (?, ?)";
+
+      if (sqlite3_prepare_v2(db, insert_content_tag, -1, &stmt, nullptr) !=
+          SQLITE_OK) {
+        log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+        continue;
+      }
+
+      sqlite3_bind_int(stmt, 1, content_id);
+      sqlite3_bind_int(stmt, 2, tag_id);
+
+      if (sqlite3_step(stmt) != SQLITE_DONE) {
+        log_to_file("Failed to associate tag: " +
+                    std::string(sqlite3_errmsg(db)));
+      }
+
+      sqlite3_finalize(stmt);
+    }
+  }
+
+  if (sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+    log_to_file("Failed to commit transaction: " +
+                std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
+
+  sqlite3_close(db);
+  return true;
+}
+
+int store_image_metadata(int content_id, int image_uuid,
+                         const std::string &original_url,
+                         const std::string &filename,
+                         const std::string &mime_type, int size_bytes,
+                         int width, int height, const std::string &image_type,
+                         const std::string &processing_status) {
+  sqlite3 *db;
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
+    log_to_file("Failed to open database: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return -1;
+  }
+
+  std::string uuid_tmp = std::to_string(image_uuid);
+  const char *uuid = uuid_tmp.c_str();
+
+  // First check if image with this UUID already exists
+  sqlite3_stmt *stmt;
+  const char *select_sql = "SELECT id FROM images WHERE id = ?";
+  int image_id = -1;
+
+  if (sqlite3_prepare_v2(db, select_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return -1;
+  }
+
+  sqlite3_bind_int(stmt, 1, image_uuid);
+
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    // Image already exists, update it
+    image_id = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    const char *update_sql =
+        "UPDATE images SET original_url = ?, filename = ?, mime_type = ?, "
+        "size = ?, width = ?, height = ?, content_id = ?, image_type = ?, "
+        "processing_status = ? WHERE id = ?";
+
+    if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_close(db);
+      return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, original_url.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, filename.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, mime_type.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, size_bytes);
+    sqlite3_bind_int(stmt, 5, width);
+    sqlite3_bind_int(stmt, 6, height);
+    sqlite3_bind_int(stmt, 7, content_id);
+    sqlite3_bind_text(stmt, 8, image_type.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 9, processing_status.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 10, image_id);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      return -1;
+    }
+  } else {
+    sqlite3_finalize(stmt);
+
+    // Insert new image
+    const char *insert_sql = "INSERT INTO images (id, original_url, filename, "
+                             "mime_type, size, width, height, "
+                             "content_id, image_type, processing_status) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    if (sqlite3_prepare_v2(db, insert_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_close(db);
+      return -1;
+    }
+
+    sqlite3_bind_int(stmt, 1, image_uuid);
+    sqlite3_bind_text(stmt, 2, original_url.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, filename.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, mime_type.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, size_bytes);
+    sqlite3_bind_int(stmt, 6, width);
+    sqlite3_bind_int(stmt, 7, height);
+    sqlite3_bind_int(stmt, 8, content_id);
+    sqlite3_bind_text(stmt, 9, image_type.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 10, processing_status.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      return -1;
+    }
+
+    image_id = sqlite3_last_insert_rowid(db);
+  }
+
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+
+  return image_id;
+}
+
+std::string process_thumbnail(const fs::path &article_dir, int content_id,
+                              bool is_published) {
+  fs::path thumbnail_dir = article_dir / "thumbnail";
+  if (!fs::exists(thumbnail_dir) || !fs::is_directory(thumbnail_dir)) {
+    log_to_file("Thumbnail directory not found");
+    return "";
+  }
+
+  // Find first image file in thumbnail directory
+  std::string thumbnail_url = "";
+  for (const auto &entry : fs::directory_iterator(thumbnail_dir)) {
+    if (!entry.is_regular_file())
+      continue;
+
+    std::string ext = entry.path().extension().string();
+    if (IMAGE_EXTENSIONS.count(ext)) {
+      // Found thumbnail image
+      std::string filename = entry.path().filename().string();
+      int uuid = generate_media_uuid(content_id, "thumbnail-" + filename);
+
+      // Extract image metadata
+      int width = 0, height = 0, size_bytes = 0;
+      std::string mime_type;
+      if (!extract_image_metadata(entry.path(), width, height, mime_type,
+                                  size_bytes)) {
+        log_to_file("Failed to extract metadata for thumbnail: " +
+                    entry.path().string());
+        width = height = 0;
+        size_bytes = fs::file_size(entry.path());
+        mime_type = "image/jpeg"; // Default
+      }
+
+      if (is_published) {
+        // Upload to GCS for published content
+        std::string gcs_key = "images/thumbnails/" + std::to_string(uuid) + ext;
+        std::string tmp_path = "/tmp/" + std::to_string(uuid) + ext;
+
+        // Copy to tmp then upload to GCS
+        fs::copy_file(entry.path(), tmp_path,
+                      fs::copy_options::overwrite_existing);
+        std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
+                          GCS_PUBLIC_BUCKET + "/" + gcs_key;
+        log_to_file("Uploading thumbnail to GCS: " + cmd);
+        std::string result = exec_command(cmd);
+        fs::remove(tmp_path);
+
+        thumbnail_url = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
+      } else {
+        // For drafts, use local path
+        fs::path local_dest =
+            STORAGE_ROOT + std::to_string(content_id) + "/thumbnail" + ext;
+        fs::create_directories(local_dest.parent_path());
+        fs::copy_file(entry.path(), local_dest,
+                      fs::copy_options::overwrite_existing);
+        thumbnail_url = "thumbnail" + ext;
+      }
+
+      // Store thumbnail metadata in database
+      std::string processing_status = "pending";
+      int image_id = store_image_metadata(
+          content_id, uuid, thumbnail_url, filename, mime_type, size_bytes,
+          width, height, "thumbnail", processing_status);
+
+      if (image_id <= 0) {
+        log_to_file("Failed to store thumbnail metadata in database");
+      }
+
+      log_to_file("Processed thumbnail: " + thumbnail_url);
+      break; // Use first image found
+    }
+  }
+
+  return thumbnail_url;
+}
+
+int store_video_metadata(int content_id, const int &video_uuid,
+                         const std::string &title, const std::string &gcs_path,
+                         const std::string &mime_type, int size_bytes,
+                         int duration_seconds, bool is_reel,
+                         const std::string &processing_status) {
+  sqlite3 *db;
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
+    log_to_file("Failed to open database: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return -1;
+  }
+
+  std::string local_uuid = std::to_string(video_uuid);
+  const char *uuid = local_uuid.c_str();
+
+  // First check if video with this UUID already exists
+  sqlite3_stmt *stmt;
+  const char *select_sql = "SELECT id FROM videos WHERE id = ?";
+  int video_id = -1;
+
+  if (sqlite3_prepare_v2(db, select_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return -1;
+  }
+
+  sqlite3_bind_int(stmt, 1, video_uuid);
+
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    // Video already exists, update it
+    video_id = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    const char *update_sql =
+        "UPDATE videos SET title = ?, gcs_path = ?, mime_type = ?, "
+        "size_bytes = ?, duration_seconds = ?, content_id = ?, is_reel = ?, "
+        "processing_status = ? WHERE id = ?";
+
+    if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_close(db);
+      return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, title.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, gcs_path.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, mime_type.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, size_bytes);
+    sqlite3_bind_int(stmt, 5, duration_seconds);
+    sqlite3_bind_int(stmt, 6, content_id);
+    sqlite3_bind_int(stmt, 7, is_reel ? 1 : 0);
+    sqlite3_bind_text(stmt, 8, processing_status.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 9, video_id);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      return -1;
+    }
+  } else {
+    sqlite3_finalize(stmt);
+
+    // Insert new video
+    const char *insert_sql =
+        "INSERT INTO videos (id, title, gcs_path, mime_type, size_bytes, "
+        "duration_seconds, content_id, is_reel, processing_status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    if (sqlite3_prepare_v2(db, insert_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_close(db);
+      return -1;
+    }
+
+    sqlite3_bind_int(stmt, 1, video_uuid);
+    sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, gcs_path.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, mime_type.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, size_bytes);
+    sqlite3_bind_int(stmt, 6, duration_seconds);
+    sqlite3_bind_int(stmt, 7, content_id);
+    sqlite3_bind_int(stmt, 8, is_reel ? 1 : 0);
+    sqlite3_bind_text(stmt, 9, processing_status.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      return -1;
+    }
+
+    video_id = sqlite3_last_insert_rowid(db);
+  }
+
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+
+  return video_id;
+}
+
+bool process_reel_metadata(int content_id, int video_id,
+                           const std::string &caption) {
+  // If video is already identified as a reel in the videos table,
+  // add/update the corresponding record in the reels table
+
+  sqlite3 *db;
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
+    log_to_file("Failed to open database: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
+
+  // Check if reel record exists
+  sqlite3_stmt *stmt;
+  const char *select_sql = "SELECT id FROM reels WHERE video_id = ?";
+
+  if (sqlite3_prepare_v2(db, select_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
+
+  sqlite3_bind_int(stmt, 1, video_id);
+
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    // Reel exists, update it
+    int reel_id = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    const char *update_sql = "UPDATE reels SET caption = ? WHERE id = ?";
+
+    if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_close(db);
+      return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, caption.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, reel_id);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      return false;
+    }
+  } else {
+    // Create new reel
+    sqlite3_finalize(stmt);
+
+    const char *insert_sql =
+        "INSERT INTO reels (video_id, caption, sort_order) VALUES (?, ?, 0)";
+
+    if (sqlite3_prepare_v2(db, insert_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_close(db);
+      return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, video_id);
+    sqlite3_bind_text(stmt, 2, caption.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      return false;
+    }
+  }
+
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  return true;
+}
+
+bool store_content_metadata(int content_id, const std::string &key,
+                            const std::string &value) {
+  if (value.empty()) {
+    return true; // Skip empty values
+  }
+
+  sqlite3 *db;
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
+    log_to_file("Failed to open database: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
+
+  const char *sql = "INSERT OR REPLACE INTO content_metadata (content_id, key, "
+                    "value) VALUES (?, ?, ?)";
+
+  sqlite3_stmt *stmt;
+  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
+
+  sqlite3_bind_int(stmt, 1, content_id);
+  sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 3, value.c_str(), -1, SQLITE_STATIC);
+
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return false;
+  }
+
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  return true;
 }
 
 // Rewrites references like "media/photo.jpg" to their full GCS URL
@@ -260,6 +860,7 @@ bool store_article_files(const fs::path &article_dir, int content_id,
     fs::create_directories(local_dest);
     log_to_file("Created local directory: " + local_dest.string());
 
+    // First pass: Process media files (images/videos)
     for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
       if (entry.is_directory())
         continue;
@@ -268,63 +869,135 @@ bool store_article_files(const fs::path &article_dir, int content_id,
 
       fs::path rel_path = fs::relative(entry.path(), article_dir);
       std::string ext = entry.path().extension().string();
-      std::string file_type;
-      if (!ext.empty())
-        file_type = ext.substr(1);
-      else
-        file_type = "bin";
 
-      if (VM_ALLOWED.count(file_type)) {
-        // Defer copying until after we potentially rewrite HTML/JS/CSS
+      if (rel_path.string().find("thumbnail/") == 0) {
+        // Skip thumbnail files, they're handled separately
         continue;
       }
 
-      // Determine media category
-      std::string category;
-      bool is_media = false;
-
+      // Process media files
       if (IMAGE_EXTENSIONS.count(ext)) {
-        category = "images/originals/";
-        is_media = true;
-      } else if (VIDEO_EXTENSIONS.count(ext)) {
-        category = "videos/originals/";
-        is_media = true;
-      } else {
-        log_to_file("Unsupported media type skipped: " + entry.path().string());
-        continue;
-      }
+        // Process image file
+        log_to_file("Processing image: " + entry.path().string());
 
-      // If we're publishing, upload media to GCS
-      if (is_published && is_media) {
-        // Generate a unique name for the file
-        std::string random_name = generate_uuid() + ext;
-        std::string gcs_key = category + random_name;
-        std::string tmp_path = "/tmp/" + random_name;
-        fs::copy_file(entry.path(), tmp_path,
-                      fs::copy_options::overwrite_existing);
+        std::string filename = entry.path().filename().string();
+        int uuid = generate_media_uuid(content_id, filename);
 
-        std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
-                          GCS_PUBLIC_BUCKET + "/" + gcs_key;
-        log_to_file("Uploading media file to GCS: " + cmd);
-        std::string result = exec_command(cmd);
-        log_to_file("GCS upload result: " + result);
+        // Extract image metadata
+        int width = 0, height = 0, size_bytes = 0;
+        std::string mime_type;
+        if (!extract_image_metadata(entry.path(), width, height, mime_type,
+                                    size_bytes)) {
+          log_to_file("Failed to extract metadata for image: " +
+                      entry.path().string());
+          width = height = 0;
+          size_bytes = fs::file_size(entry.path());
+          mime_type = "image/jpeg"; // Default
+        }
 
-        fs::remove(tmp_path);
-
+        // Generate GCS path
+        std::string gcs_key = "images/originals/" + std::to_string(uuid) + ext;
         std::string gcs_url =
             GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
-        media_url_map["media/" + entry.path().filename().string()] = gcs_url;
-        store_file_reference(content_id, file_type, gcs_url);
+
+        // Store image metadata in database
+        std::string processing_status = "pending";
+        int image_id = store_image_metadata(
+            content_id, uuid, gcs_url, filename, mime_type, size_bytes, width,
+            height, "content", processing_status);
+
+        if (image_id <= 0) {
+          log_to_file("Failed to store image metadata in database");
+          continue;
+        }
+
+        // If publishing, upload to GCS
+        if (is_published) {
+          std::string tmp_path = "/tmp/" + std::to_string(uuid) + ext;
+          fs::copy_file(entry.path(), tmp_path,
+                        fs::copy_options::overwrite_existing);
+
+          std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
+                            GCS_PUBLIC_BUCKET + "/" + gcs_key;
+          log_to_file("Uploading image to GCS: " + cmd);
+          std::string result = exec_command(cmd);
+          log_to_file("GCS upload result: " + result);
+
+          fs::remove(tmp_path);
+        }
+
+        // Map local path to GCS URL for reference rewriting
+        media_url_map["media/" + filename] = gcs_url;
+
+        // Store file reference
+        store_file_reference(content_id, ext.substr(1), gcs_url);
+
+      } else if (VIDEO_EXTENSIONS.count(ext)) {
+        // Process video file
+        log_to_file("Processing video: " + entry.path().string());
+
+        std::string filename = entry.path().filename().string();
+        int uuid = generate_media_uuid(content_id, filename);
+
+        // Extract video metadata
+        int duration_seconds = 0, size_bytes = 0;
+        std::string mime_type;
+        if (!extract_video_metadata(entry.path(), duration_seconds, mime_type,
+                                    size_bytes)) {
+          log_to_file("Failed to extract metadata for video: " +
+                      entry.path().string());
+          duration_seconds = 0;
+          size_bytes = fs::file_size(entry.path());
+          mime_type = "video/mp4"; // Default
+        }
+
+        // Generate GCS path
+        std::string gcs_key = "videos/originals/" + std::to_string(uuid) + ext;
+        std::string gcs_url =
+            GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
+
+        // Check if this is a reel (based on directory path or metadata)
+        bool is_reel = (rel_path.string().find("reels/") == 0);
+
+        // Store video metadata in database
+        std::string processing_status = "pending";
+        int video_id = store_video_metadata(
+            content_id, uuid, filename, gcs_url, mime_type, size_bytes,
+            duration_seconds, is_reel, processing_status);
+
+        if (video_id <= 0) {
+          log_to_file("Failed to store video metadata in database");
+          continue;
+        }
+
+        // If publishing, upload to GCS
+        if (is_published) {
+          std::string tmp_path = "/tmp/" + std::to_string(uuid) + ext;
+          fs::copy_file(entry.path(), tmp_path,
+                        fs::copy_options::overwrite_existing);
+
+          std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" +
+                            GCS_PUBLIC_BUCKET + "/" + gcs_key;
+          log_to_file("Uploading video to GCS: " + cmd);
+          std::string result = exec_command(cmd);
+          log_to_file("GCS upload result: " + result);
+
+          fs::remove(tmp_path);
+        }
+
+        // Map local path to GCS URL for reference rewriting
+        media_url_map["media/" + filename] = gcs_url;
+
+        // Store file reference
+        store_file_reference(content_id, ext.substr(1), gcs_url);
       }
-      // For drafts, we leave media references as-is
     }
 
-    // 🧠 Patch references in-place before saving static files, but only for
-    // published content
+    // Rewrite media references in HTML/CSS/JS files as needed
     rewrite_media_references(article_dir, media_url_map, content_id,
                              is_published);
 
-    // ⬇️ Now copy HTML/JS/CSS files AFTER they were potentially patched
+    // Second pass: Copy HTML/CSS/JS files
     for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
       if (entry.is_directory())
         continue;
@@ -348,7 +1021,7 @@ bool store_article_files(const fs::path &article_dir, int content_id,
       }
     }
 
-    // 🧹 Clean up /tmp/ folder if article_dir was a temp upload
+    // Clean up temp folder if needed
     if (article_dir.string().rfind("/tmp/", 0) == 0) {
       std::error_code ec;
       fs::remove_all(article_dir, ec);
@@ -370,12 +1043,13 @@ bool store_article_files(const fs::path &article_dir, int content_id,
 
 // Inserts or updates content_blocks and articles
 bool update_article_metadata(
-    const std::unordered_map<std::string, std::string> &meta, int &content_id) {
+    const std::unordered_map<std::string, std::string> &meta, int &content_id,
+    const fs::path &article_dir) {
+
   log_to_file("Updating article metadata");
 
   // Check for required keys first
-  const std::vector<std::string> required_keys = {"title", "slug",
-                                                  "body_markdown", "site_id"};
+  const std::vector<std::string> required_keys = {"title", "slug", "site_id"};
 
   for (const auto &key : required_keys) {
     if (meta.find(key) == meta.end()) {
@@ -384,17 +1058,30 @@ bool update_article_metadata(
     }
   }
 
-  // Now safely extract values
+  // Extract values
   const std::string title = meta.at("title");
   const std::string slug = meta.at("slug");
-  const std::string body_md = meta.at("body_markdown");
   const std::string site_id = meta.at("site_id");
+
+  // Read summary from file
+  std::string summary = read_summary_file(article_dir);
 
   // Get status if provided, default to "draft"
   std::string status = "draft";
   if (meta.find("status") != meta.end()) {
-    // Convert "0" to "draft" and "1" to "published"
     status = (meta.at("status") == "1") ? "published" : "draft";
+  }
+
+  // Check for tags
+  std::string tags_list = "";
+  if (meta.find("tags") != meta.end()) {
+    tags_list = meta.at("tags");
+  }
+
+  // Check for read_time
+  std::string read_time = "";
+  if (meta.find("read_time") != meta.end()) {
+    read_time = meta.at("read_time");
   }
 
   // Print metadata for debugging
@@ -403,13 +1090,14 @@ bool update_article_metadata(
   log_to_file("  slug: " + slug);
   log_to_file("  site_id: " + site_id);
   log_to_file("  status: " + status);
-  log_to_file("  body_md length: " + std::to_string(body_md.length()) +
+  log_to_file("  summary length: " + std::to_string(summary.length()) +
               " chars");
+  log_to_file("  tags: " + tags_list);
+  log_to_file("  read_time: " + read_time);
 
   sqlite3 *db;
   if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
-    log_to_file("Failed to open database at " + DB_PATH + ": " +
-                std::string(sqlite3_errmsg(db)));
+    log_to_file("Failed to open database: " + std::string(sqlite3_errmsg(db)));
     return false;
   }
 
@@ -428,16 +1116,42 @@ bool update_article_metadata(
   sqlite3_bind_text(stmt, 1, slug.c_str(), -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 2, site_id.c_str(), -1, SQLITE_STATIC);
 
+  bool is_new_content = false;
+  bool status_changed_to_published = false;
+
   if (sqlite3_step(stmt) == SQLITE_ROW) {
     content_id = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     log_to_file("Found existing content with ID: " +
                 std::to_string(content_id));
 
-    // Update both the article and the content_block status
+    // Check if status changed to published
+    const char *check_status_sql =
+        "SELECT status FROM content_blocks WHERE id = ?";
+
+    if (sqlite3_prepare_v2(db, check_status_sql, -1, &stmt, nullptr) !=
+        SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_close(db);
+      return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, content_id);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+      std::string old_status = (char *)sqlite3_column_text(stmt, 0);
+      if (old_status != "published" && status == "published") {
+        status_changed_to_published = true;
+        log_to_file("Status changed from " + old_status + " to published");
+      }
+    }
+
+    sqlite3_finalize(stmt);
+
+    // Update the article's summary
     const char *update_article_sql =
-        "UPDATE articles SET body_markdown = ?, last_edited = "
-        "CURRENT_TIMESTAMP WHERE content_id = ?";
+        "UPDATE articles SET summary = ?, last_edited = CURRENT_TIMESTAMP "
+        "WHERE content_id = ?";
 
     if (sqlite3_prepare_v2(db, update_article_sql, -1, &stmt, nullptr) !=
         SQLITE_OK) {
@@ -446,7 +1160,7 @@ bool update_article_metadata(
       return false;
     }
 
-    sqlite3_bind_text(stmt, 1, body_md.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, summary.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 2, content_id);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
@@ -458,11 +1172,15 @@ bool update_article_metadata(
 
     sqlite3_finalize(stmt);
 
-    // Update the status in content_blocks
-    const char *update_status_sql =
-        "UPDATE content_blocks SET status = ? WHERE id = ?";
+    // Process thumbnail
+    std::string thumbnail_url =
+        process_thumbnail(article_dir, content_id, status == "published");
 
-    if (sqlite3_prepare_v2(db, update_status_sql, -1, &stmt, nullptr) !=
+    // Update content_blocks with status and thumbnail
+    const char *update_cb_sql =
+        "UPDATE content_blocks SET status = ?, thumbnail_url = ? WHERE id = ?";
+
+    if (sqlite3_prepare_v2(db, update_cb_sql, -1, &stmt, nullptr) !=
         SQLITE_OK) {
       log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
       sqlite3_close(db);
@@ -470,7 +1188,14 @@ bool update_article_metadata(
     }
 
     sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, content_id);
+
+    if (!thumbnail_url.empty()) {
+      sqlite3_bind_text(stmt, 2, thumbnail_url.c_str(), -1, SQLITE_STATIC);
+    } else {
+      sqlite3_bind_null(stmt, 2);
+    }
+
+    sqlite3_bind_int(stmt, 3, content_id);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
@@ -478,13 +1203,46 @@ bool update_article_metadata(
       sqlite3_close(db);
       return false;
     }
+
+    sqlite3_finalize(stmt);
+
+    // Set published_at timestamp if status changed to published
+    if (status_changed_to_published) {
+      const char *update_published_at_sql =
+          "UPDATE articles SET published_at = CURRENT_TIMESTAMP WHERE "
+          "content_id = ?";
+
+      if (sqlite3_prepare_v2(db, update_published_at_sql, -1, &stmt, nullptr) !=
+          SQLITE_OK) {
+        log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+        sqlite3_close(db);
+        return false;
+      }
+
+      sqlite3_bind_int(stmt, 1, content_id);
+
+      if (sqlite3_step(stmt) != SQLITE_DONE) {
+        log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return false;
+      }
+
+      sqlite3_finalize(stmt);
+    }
   } else {
     sqlite3_finalize(stmt);
+    is_new_content = true;
     log_to_file("Creating new content entry");
+
+    // Process thumbnail for new content
+    std::string thumbnail_url =
+        process_thumbnail(article_dir, content_id, status == "published");
 
     const char *insert_cb_sql =
         "INSERT INTO content_blocks (title, url_slug, type_id, site_id, "
-        "status, language) VALUES (?, ?, 1, ?, ?, 'en');";
+        "status, language, thumbnail_url) "
+        "VALUES (?, ?, 1, ?, ?, 'en', ?);";
 
     if (sqlite3_prepare_v2(db, insert_cb_sql, -1, &stmt, nullptr) !=
         SQLITE_OK) {
@@ -498,6 +1256,12 @@ bool update_article_metadata(
     sqlite3_bind_text(stmt, 3, site_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, status.c_str(), -1, SQLITE_STATIC);
 
+    if (!thumbnail_url.empty()) {
+      sqlite3_bind_text(stmt, 5, thumbnail_url.c_str(), -1, SQLITE_STATIC);
+    } else {
+      sqlite3_bind_null(stmt, 5);
+    }
+
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
       sqlite3_finalize(stmt);
@@ -510,8 +1274,8 @@ bool update_article_metadata(
     content_id = (int)sqlite3_last_insert_rowid(db);
     log_to_file("Created content with new ID: " + std::to_string(content_id));
 
-    const char *insert_article_sql =
-        "INSERT INTO articles (content_id, body_markdown) VALUES (?, ?);";
+    const char *insert_article_sql = "INSERT INTO articles (content_id, "
+                                     "summary, published_at) VALUES (?, ?, ?);";
 
     if (sqlite3_prepare_v2(db, insert_article_sql, -1, &stmt, nullptr) !=
         SQLITE_OK) {
@@ -521,7 +1285,14 @@ bool update_article_metadata(
     }
 
     sqlite3_bind_int(stmt, 1, content_id);
-    sqlite3_bind_text(stmt, 2, body_md.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, summary.c_str(), -1, SQLITE_STATIC);
+
+    // If publishing immediately, set published_at
+    if (status == "published") {
+      sqlite3_bind_text(stmt, 3, "CURRENT_TIMESTAMP", -1, SQLITE_STATIC);
+    } else {
+      sqlite3_bind_null(stmt, 3);
+    }
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
@@ -541,6 +1312,17 @@ bool update_article_metadata(
   }
 
   sqlite3_close(db);
+
+  // Process tags (if any)
+  if (!tags_list.empty()) {
+    process_tags(content_id, tags_list);
+  }
+
+  // Store read_time in content_metadata (if provided)
+  if (!read_time.empty()) {
+    store_content_metadata(content_id, "read_time", read_time);
+  }
+
   return true;
 }
 
@@ -612,7 +1394,7 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
 
   int content_id = -1;
 
-  if (!update_article_metadata(metadata, content_id)) {
+  if (!update_article_metadata(metadata, content_id, article_path)) {
     log_to_file("Database update failed for article at: " + article_path);
     res.send(500, "Database update failed");
     return;
