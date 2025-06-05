@@ -112,7 +112,7 @@ parse_metadata(const fs::path &metadata_path) {
   }
 
   // Log which required keys are missing
-  for (const auto &key : {"title", "slug", "body_markdown", "site_id"}) {
+  for (const auto &key : {"title", "slug", "site_id"}) {
     if (metadata.find(key) == metadata.end()) {
       log_to_file("Error: Required key missing from metadata: " +
                   std::string(key));
