@@ -349,8 +349,7 @@ bool update_article_metadata(
   log_to_file("Updating article metadata");
 
   // Check for required keys first
-  const std::vector<std::string> required_keys = {"title", "slug",
-                                                  "body_markdown", "site_id"};
+  const std::vector<std::string> required_keys = {"title", "slug", "site_id"};
 
   for (const auto &key : required_keys) {
     if (meta.find(key) == meta.end()) {
@@ -359,10 +358,9 @@ bool update_article_metadata(
     }
   }
 
-  // Now safely extract values
+  // Extract required values
   const std::string title = meta.at("title");
   const std::string slug = meta.at("slug");
-  const std::string body_md = meta.at("body_markdown");
   const std::string site_id = meta.at("site_id");
 
   // Print metadata for debugging
@@ -370,17 +368,23 @@ bool update_article_metadata(
   log_to_file("  title: " + title);
   log_to_file("  slug: " + slug);
   log_to_file("  site_id: " + site_id);
-  log_to_file("  body_md length: " + std::to_string(body_md.length()) +
-              " chars");
 
   sqlite3 *db;
   if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
     log_to_file("Failed to open database at " + DB_PATH + ": " +
                 std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
     return false;
   }
 
-  sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+  // Begin transaction
+  if (sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) !=
+      SQLITE_OK) {
+    log_to_file("Failed to begin transaction: " +
+                std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
 
   sqlite3_stmt *stmt;
   const char *select_sql =
@@ -388,6 +392,7 @@ bool update_article_metadata(
 
   if (sqlite3_prepare_v2(db, select_sql, -1, &stmt, nullptr) != SQLITE_OK) {
     log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
     sqlite3_close(db);
     return false;
   }
@@ -396,27 +401,16 @@ bool update_article_metadata(
   sqlite3_bind_text(stmt, 2, site_id.c_str(), -1, SQLITE_STATIC);
 
   if (sqlite3_step(stmt) == SQLITE_ROW) {
+    // Content already exists, just return the existing ID
     content_id = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     log_to_file("Found existing content with ID: " +
                 std::to_string(content_id));
 
-    const char *update_sql =
-        "UPDATE articles SET body_markdown = ?, last_edited = "
-        "CURRENT_TIMESTAMP WHERE content_id = ?";
-
-    if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr) != SQLITE_OK) {
-      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
-      sqlite3_close(db);
-      return false;
-    }
-
-    sqlite3_bind_text(stmt, 1, body_md.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, content_id);
-
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
-      sqlite3_finalize(stmt);
+    // Commit transaction (even though we didn't change anything)
+    if (sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+      log_to_file("Failed to commit transaction: " +
+                  std::string(sqlite3_errmsg(db)));
       sqlite3_close(db);
       return false;
     }
@@ -424,6 +418,7 @@ bool update_article_metadata(
     sqlite3_finalize(stmt);
     log_to_file("Creating new content entry");
 
+    // Insert new content block
     const char *insert_cb_sql =
         "INSERT INTO content_blocks (title, url_slug, type_id, site_id, "
         "language) VALUES (?, ?, 1, ?, 'en');";
@@ -431,6 +426,7 @@ bool update_article_metadata(
     if (sqlite3_prepare_v2(db, insert_cb_sql, -1, &stmt, nullptr) !=
         SQLITE_OK) {
       log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
       sqlite3_close(db);
       return false;
     }
@@ -442,6 +438,7 @@ bool update_article_metadata(
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
       sqlite3_finalize(stmt);
+      sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
       sqlite3_close(db);
       return false;
     }
@@ -451,34 +448,13 @@ bool update_article_metadata(
     content_id = (int)sqlite3_last_insert_rowid(db);
     log_to_file("Created content with new ID: " + std::to_string(content_id));
 
-    const char *insert_article_sql =
-        "INSERT INTO articles (content_id, body_markdown) VALUES (?, ?);";
-
-    if (sqlite3_prepare_v2(db, insert_article_sql, -1, &stmt, nullptr) !=
-        SQLITE_OK) {
-      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    // Commit the transaction
+    if (sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+      log_to_file("Failed to commit transaction: " +
+                  std::string(sqlite3_errmsg(db)));
       sqlite3_close(db);
       return false;
     }
-
-    sqlite3_bind_int(stmt, 1, content_id);
-    sqlite3_bind_text(stmt, 2, body_md.c_str(), -1, SQLITE_STATIC);
-
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
-      sqlite3_finalize(stmt);
-      sqlite3_close(db);
-      return false;
-    }
-  }
-
-  sqlite3_finalize(stmt);
-
-  if (sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
-    log_to_file("Failed to commit transaction: " +
-                std::string(sqlite3_errmsg(db)));
-    sqlite3_close(db);
-    return false;
   }
 
   sqlite3_close(db);
