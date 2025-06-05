@@ -776,18 +776,16 @@ void rewrite_media_references(
 
     // 📄 Replace local script and style references with article URL-based ones
     if (filename == "index.html") {
-      std::regex css_pattern(R"(href\s*=\s*["']style\.css["'])");
-      std::regex js_pattern(R"(src\s*=\s*["']script\.js["'])");
-
+      // Handle CSS files
+      std::regex css_pattern(R"(href\s*=\s*["'](?:\.\/)?([^"']*\.css)["'])");
       std::string new_content = std::regex_replace(
-          content, css_pattern, "href=\"" + base_url + "style.css\"");
-      if (new_content != content) {
-        content = new_content;
-        modified = true;
-      }
+          content, css_pattern, "href=\"" + base_url + "$1\"");
 
-      new_content = std::regex_replace(content, js_pattern,
-                                       "src=\"" + base_url + "script.js\"");
+      // Handle ALL JavaScript files (not just script.js)
+      std::regex js_pattern(R"(src\s*=\s*["'](?:\.\/)?([^"']*\.js)["'])");
+      new_content = std::regex_replace(new_content, js_pattern,
+                                       "src=\"" + base_url + "$1\"");
+
       if (new_content != content) {
         content = new_content;
         modified = true;
