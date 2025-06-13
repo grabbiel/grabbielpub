@@ -100,7 +100,7 @@ void HttpServer::run() {
 
   sockaddr_in address;
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = INADDR_ANY;
+  address.sin_addr.s_addr = inet_addr("127.0.0.1");
   address.sin_port = htons(port);
 
   std::cout << "[*] Attempting to bind to 127.0.0.1:" << port << "..."
