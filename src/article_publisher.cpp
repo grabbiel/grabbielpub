@@ -425,7 +425,7 @@ bool update_article_metadata(
     // Insert new content block
     const char *insert_cb_sql =
         "INSERT INTO content_blocks (title, url_slug, type_id, site_id, "
-        "language, status) VALUES (?, ?, ?, ?, 'en', ?);";
+        "language, status) VALUES (?, ?, ?, ?, ?, ?);";
 
     if (sqlite3_prepare_v2(db, insert_cb_sql, -1, &stmt, nullptr) !=
         SQLITE_OK) {
@@ -439,7 +439,8 @@ bool update_article_metadata(
     sqlite3_bind_text(stmt, 2, slug.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, type_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, site_id.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, status.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, lang.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, status.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
