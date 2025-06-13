@@ -470,9 +470,10 @@ bool update_article_metadata(
 
 bool process_thumbnail(const fs::path &article_dir, int content_id) {
   fs::path thumbnail_dir = article_dir / "thumbnail";
-  if (!fs::exists(thumbnail_dir))
+  if (!fs::exists(thumbnail_dir)) {
+    log_to_file("No thumbnail directory found");
     return false; // Optional feature
-
+  }
   // Find single image in thumbnail folder
   std::string image_file;
   for (const auto &entry : fs::directory_iterator(thumbnail_dir)) {
@@ -482,9 +483,10 @@ bool process_thumbnail(const fs::path &article_dir, int content_id) {
     }
   }
 
-  if (image_file.empty())
+  if (image_file.empty()) {
+    log_to_file("No valid images in thumbnail directory");
     return false; // No thumbnail
-
+  }
   // Upload to GCS
   std::string uuid = generate_uuid();
   std::string ext = fs::path(image_file).extension().string();
@@ -586,15 +588,15 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
     return;
   }
 
-  if (!store_article_files(article_path, content_id)) {
-    log_to_file("File storage failed for article at: " + article_path);
-    res.send(500, "File storage failed");
-    return;
-  }
-
   if (!process_thumbnail(article_path, content_id)) {
     log_to_file("Thumbnail processing failed for article at: " + article_path);
     res.send(500, "Thumbnail processing failed");
+    return;
+  }
+
+  if (!store_article_files(article_path, content_id)) {
+    log_to_file("File storage failed for article at: " + article_path);
+    res.send(500, "File storage failed");
     return;
   }
 
