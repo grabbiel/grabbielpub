@@ -391,16 +391,28 @@ bool update_article_metadata(
   while (std::getline(tags_stream, tag, ',')) {
     tag.erase(0, tag.find_first_not_of(" \t"));
     tag.erase(tag.find_last_not_of(" \t") + 1);
-    sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO tags (name) VALUES (?)", -1,
-                       &stmt, nullptr);
+    const char *insert_tag_sql = "INSERT OR IGNORE INTO tags (name) VALUES (?)";
+    if (sqlite3_prepare_v2(db, insert_tag_sql, -1, &stmt, nullptr) !=
+        SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+      sqlite3_close(db);
+      return false;
+    }
     sqlite3_bind_text(stmt, 1, tag.c_str(), -1, SQLITE_STATIC);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    sqlite3_prepare_v2(db,
-                       "INSERT INTO content_tags (content_id, tag_id) SELECT "
-                       "?, id FROM tags WHERE name = ?",
-                       -1, &stmt, nullptr);
+    const char *insert_tags_sql =
+        "INSERT INTO content_tags (content_id, tag_id) SELECT ?, id FROM tags "
+        "WHERE name = ?";
+    if (sqlite3_prepare_v2(db, insert_tags_sql, -1, &stmt, nullptr) !=
+        SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+      sqlite3_close(db);
+      return false;
+    }
     sqlite3_bind_int(stmt, 1, content_id);
     sqlite3_bind_text(stmt, 2, tag.c_str(), -1, SQLITE_STATIC);
     sqlite3_step(stmt);
