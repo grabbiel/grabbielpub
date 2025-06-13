@@ -349,22 +349,15 @@ bool update_article_metadata(
     const std::unordered_map<std::string, std::string> &meta, int &content_id) {
   log_to_file("Updating article metadata");
 
-  // Check for required keys first
-  const std::vector<std::string> required_keys = {"title", "slug", "site_id"};
-
-  for (const auto &key : required_keys) {
-    if (meta.find(key) == meta.end()) {
-      log_to_file("Error: Missing required metadata key: " + key);
-      return false;
-    }
-  }
-
   // Extract required values
   const std::string title = meta.at("title");
   const std::string slug = meta.at("slug");
   const std::string site_id = meta.at("site_id");
   const std::string status = meta.at("status");
   const std::string type_id = meta.at("type_id");
+  const std::string tags = meta.at("tags");
+  std::istringstream tags_stream(tags);
+  std::string tag;
 
   // Print metadata for debugging
   log_to_file("Processing metadata:");
@@ -373,6 +366,7 @@ bool update_article_metadata(
   log_to_file("\tsite_id: " + site_id);
   log_to_file("\tstatus: " + status);
   log_to_file("\ttype_id: " + type_id);
+  log_to_file("\ttags: " + tags);
 
   sqlite3 *db;
   if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
@@ -392,6 +386,27 @@ bool update_article_metadata(
   }
 
   sqlite3_stmt *stmt;
+
+  // tag processing
+  while (std::getline(tags_stream, tag, ',')) {
+    tag.erase(0, tag.find_first_not_of(" \t"));
+    tag.erase(tag.find_last_not_of(" \t") + 1);
+    sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO tags (name) VALUES (?)", -1,
+                       &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, tag.c_str(), -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    sqlite3_prepare_v2(db,
+                       "INSERT INTO content_tags (content_id, tag_id) SELECT "
+                       "?, id FROM tags WHERE name = ?",
+                       -1, &stmt, nullptr);
+    sqlite3_bind_int(stmt, 1, content_id);
+    sqlite3_bind_text(stmt, 2, tag.c_str(), -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+  }
+
   const char *select_sql = "SELECT id FROM content_blocks WHERE url_slug = ? "
                            "AND site_id = ? AND type_id = ?";
 
@@ -520,7 +535,7 @@ bool process_thumbnail(const fs::path &article_dir, int content_id) {
       "'thumbnail', 'complete')";
   sqlite3_prepare_v2(db, img_sql, -1, &stmt, nullptr);
   sqlite3_bind_text(stmt, 1, gcs_url.c_str(), -1, SQLITE_STATIC);
-  sqlite3_bind_text(stmt, 2, image_file.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, (uuid + ext).c_str(), -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 3, ("image/" + ext.substr(1)).c_str(), -1,
                     SQLITE_STATIC);
   sqlite3_bind_int(stmt, 4, content_id);
