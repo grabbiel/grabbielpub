@@ -112,7 +112,7 @@ parse_metadata(const fs::path &metadata_path) {
   }
 
   // Log which required keys are missing
-  for (const auto &key : {"title", "slug", "site_id"}) {
+  for (const auto &key : {"title", "slug", "site_id", "status", "type_id"}) {
     if (metadata.find(key) == metadata.end()) {
       log_to_file("Error: Required key missing from metadata: " +
                   std::string(key));
@@ -362,12 +362,16 @@ bool update_article_metadata(
   const std::string title = meta.at("title");
   const std::string slug = meta.at("slug");
   const std::string site_id = meta.at("site_id");
+  const std::string status = meta.at("status");
+  const std::string type_id = meta.at("type_id");
 
   // Print metadata for debugging
   log_to_file("Processing metadata:");
-  log_to_file("  title: " + title);
-  log_to_file("  slug: " + slug);
-  log_to_file("  site_id: " + site_id);
+  log_to_file("\ttitle: " + title);
+  log_to_file("\tslug: " + slug);
+  log_to_file("\tsite_id: " + site_id);
+  log_to_file("\tstatus: " + status);
+  log_to_file("\ttype_id: " + type_id);
 
   sqlite3 *db;
   if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
@@ -387,8 +391,8 @@ bool update_article_metadata(
   }
 
   sqlite3_stmt *stmt;
-  const char *select_sql =
-      "SELECT id FROM content_blocks WHERE url_slug = ? AND site_id = ?";
+  const char *select_sql = "SELECT id FROM content_blocks WHERE url_slug = ? "
+                           "AND site_id = ? AND type_id = ?";
 
   if (sqlite3_prepare_v2(db, select_sql, -1, &stmt, nullptr) != SQLITE_OK) {
     log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
@@ -399,6 +403,7 @@ bool update_article_metadata(
 
   sqlite3_bind_text(stmt, 1, slug.c_str(), -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 2, site_id.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 3, type_id.c_str(), -1, SQLITE_STATIC);
 
   if (sqlite3_step(stmt) == SQLITE_ROW) {
     // Content already exists, just return the existing ID
@@ -421,7 +426,7 @@ bool update_article_metadata(
     // Insert new content block
     const char *insert_cb_sql =
         "INSERT INTO content_blocks (title, url_slug, type_id, site_id, "
-        "language) VALUES (?, ?, 1, ?, 'en');";
+        "language, status) VALUES (?, ?, ?, ?, 'en', ?);";
 
     if (sqlite3_prepare_v2(db, insert_cb_sql, -1, &stmt, nullptr) !=
         SQLITE_OK) {
@@ -433,7 +438,9 @@ bool update_article_metadata(
 
     sqlite3_bind_text(stmt, 1, title.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, slug.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, site_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, type_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, site_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, status.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
