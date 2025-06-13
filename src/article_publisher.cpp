@@ -468,6 +468,66 @@ bool update_article_metadata(
   return true;
 }
 
+bool process_thumbnail(const fs::path &article_dir, int content_id) {
+  fs::path thumbnail_dir = article_dir / "thumbnail";
+  if (!fs::exists(thumbnail_dir))
+    return false; // Optional feature
+
+  // Find single image in thumbnail folder
+  std::string image_file;
+  for (const auto &entry : fs::directory_iterator(thumbnail_dir)) {
+    std::string ext = entry.path().extension().string();
+    if (IMAGE_EXTENSIONS.count(ext)) {
+      image_file = entry.path().string();
+    }
+  }
+
+  if (image_file.empty())
+    return false; // No thumbnail
+
+  // Upload to GCS
+  std::string uuid = generate_uuid();
+  std::string ext = fs::path(image_file).extension().string();
+  std::string gcs_key = "images/thumbnails/" + uuid + ext;
+  std::string tmp_path = "/tmp/" + uuid + ext;
+
+  fs::copy_file(image_file, tmp_path);
+  std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" + GCS_PUBLIC_BUCKET +
+                    "/" + gcs_key;
+  exec_command(cmd);
+  fs::remove(tmp_path);
+
+  std::string gcs_url = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
+
+  // Update content_blocks with thumbnail_url
+  sqlite3 *db;
+  sqlite3_open(DB_PATH.c_str(), &db);
+  sqlite3_stmt *stmt;
+  const char *sql = "UPDATE content_blocks SET thumbnail_url = ? WHERE id = ?";
+  sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+  sqlite3_bind_text(stmt, 1, gcs_url.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_int(stmt, 2, content_id);
+  sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+
+  // Insert into images table
+  const char *img_sql =
+      "INSERT INTO images (original_url, filename, mime_type, content_id, "
+      "image_type, processing_status) VALUES (?, ?, ?, ?, "
+      "'thumbnail', 'complete')";
+  sqlite3_prepare_v2(db, img_sql, -1, &stmt, nullptr);
+  sqlite3_bind_text(stmt, 1, gcs_url.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, (uuid + ext).c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 3, ("image/" + ext.substr(1)).c_str(), -1,
+                    SQLITE_STATIC);
+  sqlite3_bind_int(stmt, 4, content_id);
+  sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+
+  return true;
+}
+
 void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
   log_to_file("Received publish request");
 
@@ -529,6 +589,12 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
   if (!store_article_files(article_path, content_id)) {
     log_to_file("File storage failed for article at: " + article_path);
     res.send(500, "File storage failed");
+    return;
+  }
+
+  if (!process_thumbnail(article_path, content_id)) {
+    log_to_file("Thumbnail processing failed for article at: " + article_path);
+    res.send(500, "Thumbnail processing failed");
     return;
   }
 
