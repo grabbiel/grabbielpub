@@ -133,16 +133,20 @@ void rewrite_media_references(
     const std::unordered_map<std::string, std::string> &media_map,
     int content_id) {
 
-  std::vector<std::string> target_files = {"index.html", "script.js",
-                                           "style.css"};
+  std::vector<std::string> target_ext = {".html", ".js", ".css"};
   std::string base_url =
       "https://server.grabbiel.com/article/" + std::to_string(content_id) + "/";
 
-  for (const auto &filename : target_files) {
-    fs::path file_path = article_dir / filename;
-    if (!fs::exists(file_path))
+  for (const auto &entry : fs::directory_iterator(article_dir)) {
+    if (entry.is_directory())
+      continue;
+    std::string ext = entry.path().extension().string();
+
+    if (std::find(target_ext.begin(), target_ext.end(), ext) ==
+        target_ext.end())
       continue;
 
+    fs::path file_path = entry.path();
     std::ifstream in(file_path);
     if (!in) {
       std::cerr << "[rewrite] Failed to open " << file_path << " for reading\n";
@@ -167,7 +171,7 @@ void rewrite_media_references(
     }
 
     // 📄 Replace local script and style references with article URL-based ones
-    if (filename == "index.html") {
+    if (entry.path().filename() == "index.html") {
       // Handle CSS files
       std::regex css_pattern(R"(href\s*=\s*["'](?:\.\/)?([^"']*\.css)["'])");
       std::string new_content = std::regex_replace(
@@ -248,10 +252,9 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
     fs::create_directories(local_dest);
     log_to_file("Created local directory: " + local_dest.string());
 
-    for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
+    fs::path media_dir = article_dir / "media";
+    for (const auto &entry : fs::directory_iterator(media_dir)) {
       if (entry.is_directory())
-        continue;
-      if (entry.path().filename() == "metadata.txt")
         continue;
 
       fs::path rel_path = fs::relative(entry.path(), article_dir);
@@ -261,11 +264,6 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
         file_type = ext.substr(1);
       else
         file_type = "bin";
-
-      if (VM_ALLOWED.count(file_type)) {
-        // Defer copying until after we rewrite HTML/JS/CSS
-        continue;
-      }
 
       std::string category;
       if (IMAGE_EXTENSIONS.count(ext)) {
@@ -293,14 +291,13 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
 
       std::string gcs_url = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
       media_url_map["media/" + entry.path().filename().string()] = gcs_url;
-      store_file_reference(content_id, file_type, gcs_url);
     }
 
     // 🧠 Patch references in-place before saving static files
     rewrite_media_references(article_dir, media_url_map, content_id);
 
     // ⬇️ Now copy HTML/JS/CSS files AFTER they were patched
-    for (const auto &entry : fs::recursive_directory_iterator(article_dir)) {
+    for (const auto &entry : fs::directory_iterator(article_dir)) {
       if (entry.is_directory())
         continue;
       if (entry.path().filename() == "metadata.txt")
@@ -318,7 +315,11 @@ bool store_article_files(const fs::path &article_dir, int content_id) {
         fs::path dest = local_dest / rel_path;
         fs::create_directories(dest.parent_path());
         fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing);
-        store_file_reference(content_id, file_type, rel_path.string());
+        if (!store_file_reference(content_id, file_type, dest.string())) {
+          log_to_file("Failed to store in DB reference to local-only file: " +
+                      rel_path.string());
+          return false;
+        }
         log_to_file("Copied local-only file: " + rel_path.string());
       }
     }
@@ -519,7 +520,7 @@ bool process_thumbnail(const fs::path &article_dir, int content_id) {
       "'thumbnail', 'complete')";
   sqlite3_prepare_v2(db, img_sql, -1, &stmt, nullptr);
   sqlite3_bind_text(stmt, 1, gcs_url.c_str(), -1, SQLITE_STATIC);
-  sqlite3_bind_text(stmt, 2, (uuid + ext).c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, image_file.c_str(), -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 3, ("image/" + ext.substr(1)).c_str(), -1,
                     SQLITE_STATIC);
   sqlite3_bind_int(stmt, 4, content_id);
