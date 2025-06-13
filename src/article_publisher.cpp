@@ -112,10 +112,12 @@ parse_metadata(const fs::path &metadata_path) {
   }
 
   // Log which required keys are missing
-  for (const auto &key : {"title", "slug", "site_id", "status", "type_id"}) {
+  for (const auto &key :
+       {"title", "slug", "site_id", "status", "type_id", "language", "tags"}) {
     if (metadata.find(key) == metadata.end()) {
       log_to_file("Error: Required key missing from metadata: " +
                   std::string(key));
+      return {};
     }
   }
 
@@ -356,6 +358,7 @@ bool update_article_metadata(
   const std::string status = meta.at("status");
   const std::string type_id = meta.at("type_id");
   const std::string tags = meta.at("tags");
+  const std::string lang = meta.at("language");
   std::istringstream tags_stream(tags);
   std::string tag;
 
@@ -609,6 +612,11 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
 
   // Proceed with metadata parsing and database update
   auto metadata = parse_metadata(meta_file);
+  if (metadata.empty()) {
+    log_to_file("Not enough metadata for article at " + article_path);
+    res.send(500, "Metadata fetching failed");
+    return;
+  }
   int content_id = -1;
 
   if (!update_article_metadata(metadata, content_id)) {
