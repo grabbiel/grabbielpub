@@ -707,6 +707,7 @@ bool process_sochee_image(const std::string &input_path,
                            output_path + "\"";
 
   if (exec_command(resize_cmd).find("Error") != std::string::npos) {
+    log_to_file("Failed to convert image " + input_path);
     return false;
   }
 
@@ -717,7 +718,11 @@ bool process_sochee_image(const std::string &input_path,
       std::to_string(square_size) + "x" + std::to_string(square_size) +
       "+0+0 \"" + output_path + "\"";
 
-  return exec_command(crop_cmd).find("Error") == std::string::npos;
+  if (exec_command(crop_cmd).find("Error") != std::string::npos) {
+    log_to_file("Failed image to a square " + input_path);
+    return false;
+  }
+  return true;
 }
 
 bool process_sochee_images(
@@ -771,7 +776,8 @@ bool process_sochee_images(
 
     // Process image (resize + crop)
     if (!process_sochee_image(ordered_images[i], processed_path, target_dims)) {
-      continue;
+      log_to_file("Failed to process image " + std::to_string(i));
+      return false;
     }
 
     // Upload to GCS sochee folder
