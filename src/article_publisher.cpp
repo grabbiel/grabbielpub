@@ -879,13 +879,15 @@ bool create_sochee_content_block(
 
   // Create content_blocks entry
   sqlite3_stmt *stmt;
-  const char *cb_sql =
-      "INSERT INTO content_blocks (title, url_slug, type_id, status, language) "
-      "VALUES (?, ?, 2, 'published', 'en')";
+  const char *cb_sql = "INSERT INTO content_blocks (title, url_slug, type_id, "
+                       "status, language, site_id) "
+                       "VALUES (?, ?, ?, 'published', ?, ?)";
 
   std::string title = metadata.at("title");
-  std::string slug = generate_uuid();
+  std::string slug = metadata.at("slug");
+  std::string type_id = metadata.at("type_id");
   std::string lang = metadata.at("language");
+  std::string site_id = metadata.at("site_id");
 
   if (sqlite3_prepare_v2(db, cb_sql, -1, &stmt, nullptr)) {
     log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
@@ -895,6 +897,9 @@ bool create_sochee_content_block(
   }
   sqlite3_bind_text(stmt, 1, title.c_str(), -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 2, slug.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 3, type_id.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 4, lang.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 5, site_id.c_str(), -1, SQLITE_STATIC);
 
   if (sqlite3_step(stmt) != SQLITE_DONE) {
     sqlite3_finalize(stmt);
