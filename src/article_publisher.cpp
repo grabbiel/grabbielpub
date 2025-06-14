@@ -859,6 +859,224 @@ bool process_sochee_images(
   return true;
 }
 
+bool create_sochee_content_block(
+    const std::unordered_map<std::string, std::string> &metadata,
+    int &content_id, const std::string &sochee_path) {
+  // Validate required fields
+  if (metadata.find("location") == metadata.end() ||
+      metadata.find("caption") == metadata.end() ||
+      metadata.find("1") == metadata.end()) {
+    log_to_file("Missing required sochee metadata fields");
+    return false;
+  }
+
+  sqlite3 *db;
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK)
+    return false;
+
+  sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
+
+  // Create content_blocks entry
+  sqlite3_stmt *stmt;
+  const char *cb_sql =
+      "INSERT INTO content_blocks (title, url_slug, type_id, status, language) "
+      "VALUES (?, ?, 2, 'published', 'en')";
+
+  std::string title = metadata.at("title");
+  std::string slug = generate_uuid();
+  std::string lang = metadata.at("language");
+
+  if (sqlite3_prepare_v2(db, cb_sql, -1, &stmt, nullptr)) {
+    log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return false;
+  }
+  sqlite3_bind_text(stmt, 1, title.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, slug.c_str(), -1, SQLITE_STATIC);
+
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    sqlite3_finalize(stmt);
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return false;
+  }
+  sqlite3_finalize(stmt);
+
+  content_id = (int)sqlite3_last_insert_rowid(db);
+
+  // Count images to determine 'single' value
+  int image_count = 0;
+  for (int i = 1;; i++) {
+    if (metadata.find(std::to_string(i)) == metadata.end())
+      break;
+    image_count++;
+  }
+
+  // Count hashtags
+  int hashtag_count = 0;
+  if (metadata.find("hashtags") != metadata.end()) {
+    std::string hashtags = metadata.at("hashtags");
+    hashtag_count = std::count(hashtags.begin(), hashtags.end(), '#');
+  }
+
+  // Check for link folder
+  bool has_link = fs::exists(fs::path(sochee_path) / "link");
+
+  // Create sochee entry
+  const char *sochee_sql =
+      "INSERT INTO sochee (id, single, comments, likes, caption, "
+      "hashtag, location, has_link) VALUES (?, ?, 0, 0, ?, ?, ?, ?)";
+
+  if (sqlite3_prepare_v2(db, sochee_sql, -1, &stmt, nullptr)) {
+    log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return false;
+  }
+  sqlite3_bind_int(stmt, 1, content_id);
+  sqlite3_bind_int(stmt, 2, image_count == 1 ? 1 : 0);
+  sqlite3_bind_text(stmt, 3, metadata.at("caption").c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_int(stmt, 4, hashtag_count);
+  sqlite3_bind_text(stmt, 5, metadata.at("location").c_str(), -1,
+                    SQLITE_STATIC);
+  sqlite3_bind_int(stmt, 6, has_link ? 1 : 0);
+
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    sqlite3_finalize(stmt);
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return false;
+  }
+  sqlite3_finalize(stmt);
+
+  sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
+  sqlite3_close(db);
+  return true;
+}
+
+bool process_sochee_link(const std::string &sochee_path, int content_id) {
+  fs::path link_dir = fs::path(sochee_path) / "link";
+  if (!fs::exists(link_dir)) {
+    return true;
+  }
+
+  // Find exactly one image and link.txt
+  std::string image_file;
+  fs::path link_txt_path = link_dir / "link.txt";
+
+  if (!fs::exists(link_txt_path)) {
+    log_to_file("Missing link.txt in link folder");
+    return false;
+  }
+
+  // Find single image
+  for (const auto &entry : fs::directory_iterator(link_dir)) {
+    if (entry.path().filename() == "link.txt")
+      continue;
+
+    std::string ext = entry.path().extension().string();
+    if (IMAGE_EXTENSIONS.count(ext)) {
+      if (!image_file.empty()) {
+        log_to_file("Multiple images found in link folder");
+        return false;
+      }
+      image_file = entry.path().string();
+    }
+  }
+
+  if (image_file.empty()) {
+    log_to_file("No image found in link folder");
+    return false;
+  }
+
+  // Parse link.txt
+  std::unordered_map<std::string, std::string> link_data =
+      parse_metadata(link_txt_path);
+  if (link_data.find("url") == link_data.end() ||
+      link_data.find("name") == link_data.end()) {
+    log_to_file("Missing required fields in link.txt (url, name)");
+    return false;
+  }
+
+  std::string url = link_data.at("url");
+  std::string name = link_data.at("name");
+
+  // Upload image to GCS
+  std::string uuid = generate_uuid();
+  std::string ext = fs::path(image_file).extension().string();
+  std::string gcs_key = "images/sochee/" + uuid + ext;
+  std::string tmp_path = "/tmp/" + uuid + ext;
+
+  fs::copy_file(image_file, tmp_path);
+  std::string cmd = "gsutil cp \"" + tmp_path + "\" gs://" + GCS_PUBLIC_BUCKET +
+                    "/" + gcs_key;
+  exec_command(cmd);
+  fs::remove(tmp_path);
+
+  std::string gcs_url = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
+
+  // Database operations
+  sqlite3 *db;
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK)
+    return false;
+
+  sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
+
+  sqlite3_stmt *stmt;
+
+  // Insert into images table
+  const char *insert_image_record =
+      "INSERT INTO images (original_url, filename, mime_type, content_id, "
+      "image_type, processing_status) VALUES (?, ?, ?, ?, ?, 'complete')";
+  if (sqlite3_prepare_v2(db, insert_image_record, -1, &stmt, nullptr) !=
+      SQLITE_OK) {
+    log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return false;
+  };
+  sqlite3_bind_text(stmt, 1, gcs_url.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, (uuid + ext).c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 3, ("image/" + ext).c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_int(stmt, 4, content_id);
+  sqlite3_bind_text(stmt, 5, "sochee_link", -1, SQLITE_STATIC);
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_finalize(stmt);
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return false;
+  }
+  sqlite3_finalize(stmt);
+  int image_id = (int)sqlite3_last_insert_rowid(db);
+
+  // Insert into sochee_link table
+  const char *link_sql =
+      "INSERT INTO sochee_link (id, image_id, url, name) VALUES (?, ?, ?, ?)";
+
+  if (sqlite3_prepare_v2(db, link_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return false;
+  }
+  sqlite3_bind_int(stmt, 1, content_id);
+  sqlite3_bind_int(stmt, 2, image_id);
+  sqlite3_bind_text(stmt, 3, url.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 4, name.c_str(), -1, SQLITE_STATIC);
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+    sqlite3_finalize(stmt);
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return false;
+  }
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  return true;
+}
+
 void handle_sochee_request(const HttpRequest &req, HttpResponse &res) {
   log_to_file("Received sochee publish request");
   std::string sochee_path;
@@ -893,15 +1111,18 @@ void handle_sochee_request(const HttpRequest &req, HttpResponse &res) {
   }
   auto metadata = parse_metadata(fs::path(sochee_path) / "metadata.txt");
   int content_id = -1;
-  // if (!create_sochee_content_block(metadata, content_id)) {
-  //   res.send(500, "Failed to create content block");
-  //   return;
-  // }
+  if (!create_sochee_content_block(metadata, content_id, sochee_path)) {
+    res.send(500, "Failed to create content block");
+    return;
+  }
   if (!process_sochee_images(sochee_path, content_id, metadata)) {
     res.send(500, "Failed to process images");
     return;
   }
-  // process_sochee_link(sochee_path, content_id);
+  if (!process_sochee_link(sochee_path, content_id)) {
+    res.send(500, "Failed to process link in sochee");
+    return;
+  }
   res.send(200, "Sochee published with ID: " + std::to_string(content_id));
 }
 
