@@ -680,10 +680,15 @@ ImageDimensions get_image_dimensions(const std::string &image_path) {
 
 ImageDimensions
 find_smallest_dimensions(const std::vector<std::string> &image_paths) {
-  ImageDimensions smallest = {INT_MAX, INT_MAX};
+  if (image_paths.empty())
+    return {0, 0};
 
-  for (const auto &path : image_paths) {
-    ImageDimensions dims = get_image_dimensions(path);
+  // Initialize with first image dimensions instead of INT_MAX
+  ImageDimensions smallest = get_image_dimensions(image_paths[0]);
+
+  // Compare with remaining images
+  for (int i = 1; i < image_paths.size(); i++) {
+    ImageDimensions dims = get_image_dimensions(image_paths[i]);
     if (dims.width * dims.height < smallest.width * smallest.height) {
       smallest = dims;
     }
@@ -791,7 +796,7 @@ bool process_sochee_images(
     sqlite3_bind_text(stmt, 2, (uuid + ext).c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, ("image/" + ext).c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 4, content_id);
-    sqlite3_bind_text(stmt, 5, "sochee", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, "content", -1, SQLITE_STATIC);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
       log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
       sqlite3_finalize(stmt);
