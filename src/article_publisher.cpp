@@ -26,6 +26,10 @@ const std::unordered_set<std::string> VIDEO_EXTENSIONS = {
     ".mp4", ".mov", ".webm", ".avi", ".mkv"};
 const std::vector<std::string> REQUIRED_FILES = {"index.html", "style.css",
                                                  "script.js"};
+struct ImageDimensions {
+  int width;
+  int height;
+};
 
 void log_to_file(const std::string &message) {
   std::ofstream log_file(LOG_FILE, std::ios::app);
@@ -369,6 +373,7 @@ bool update_article_metadata(
   log_to_file("\tsite_id: " + site_id);
   log_to_file("\tstatus: " + status);
   log_to_file("\ttype_id: " + type_id);
+  log_to_file("\tlanguage: " + lang);
   log_to_file("\ttags: " + tags);
 
   sqlite3 *db;
@@ -643,6 +648,263 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
   res.send(200, "Article published with ID: " + std::to_string(content_id));
 }
 
+bool validate_sochee_structure(const std::string &sochee_path) {
+  fs::path media_dir = fs::path(sochee_path) / "media";
+  fs::path metadata_file = fs::path(sochee_path) / "metadata.txt";
+
+  // Check required components
+  if (!fs::exists(media_dir) || !fs::exists(metadata_file))
+    return false;
+
+  // Count images in media folder
+  int image_count = 0;
+  for (const auto &entry : fs::directory_iterator(media_dir)) {
+    std::string ext = entry.path().extension().string();
+    if (IMAGE_EXTENSIONS.count(ext))
+      image_count++;
+  }
+
+  return image_count >= 1;
+}
+
+ImageDimensions get_image_dimensions(const std::string &image_path) {
+  std::string cmd = "identify -format \"%w %h\" \"" + image_path + "\"";
+  std::string result = exec_command(cmd);
+
+  std::istringstream iss(result);
+  ImageDimensions dims;
+  iss >> dims.width >> dims.height;
+  return dims;
+}
+
+ImageDimensions
+find_smallest_dimensions(const std::vector<std::string> &image_paths) {
+  ImageDimensions smallest = {INT_MAX, INT_MAX};
+
+  for (const auto &path : image_paths) {
+    ImageDimensions dims = get_image_dimensions(path);
+    if (dims.width * dims.height < smallest.width * smallest.height) {
+      smallest = dims;
+    }
+  }
+  return smallest;
+}
+
+bool process_sochee_image(const std::string &input_path,
+                          const std::string &output_path,
+                          const ImageDimensions &target_dims) {
+  // Step 1: Resize to target dimensions
+  std::string resize_cmd = "convert \"" + input_path + "\" -resize " +
+                           std::to_string(target_dims.width) + "x" +
+                           std::to_string(target_dims.height) + "! \"" +
+                           output_path + "\"";
+
+  if (exec_command(resize_cmd).find("Error") != std::string::npos) {
+    return false;
+  }
+
+  // Step 2: Crop to square (using smaller dimension)
+  int square_size = std::min(target_dims.width, target_dims.height);
+  std::string crop_cmd =
+      "convert \"" + output_path + "\" -gravity center -crop " +
+      std::to_string(square_size) + "x" + std::to_string(square_size) +
+      "+0+0 \"" + output_path + "\"";
+
+  return exec_command(crop_cmd).find("Error") == std::string::npos;
+}
+
+bool process_sochee_images(
+    const std::string &sochee_path, int content_id,
+    const std::unordered_map<std::string, std::string> &metadata) {
+  fs::path media_dir = fs::path(sochee_path) / "media";
+
+  // Build ordered list from metadata ("1", "2", "3" keys)
+  std::vector<std::string> ordered_images;
+  for (int i = 1;; i++) {
+    std::string key = std::to_string(i);
+    if (metadata.find(key) == metadata.end())
+      break;
+
+    std::string filename = metadata.at(key);
+    fs::path full_path = media_dir / filename;
+    if (fs::exists(full_path)) {
+      ordered_images.push_back(full_path.string());
+    }
+  }
+
+  if (ordered_images.empty())
+    return false;
+
+  // Find target dimensions
+  ImageDimensions target_dims = find_smallest_dimensions(ordered_images);
+
+  // Open database
+  sqlite3 *db;
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
+    log_to_file("Failed to open database at " + DB_PATH + ": " +
+                std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
+  // Begin transaction
+  if (sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) !=
+      SQLITE_OK) {
+    log_to_file("Failed to begin transaction: " +
+                std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
+
+  for (int i = 0; i < ordered_images.size(); i++) {
+    std::string uuid = generate_uuid();
+    std::string ext = fs::path(ordered_images[i]).extension().string();
+    std::string processed_path = "/tmp/" + uuid + ext;
+
+    // Process image (resize + crop)
+    if (!process_sochee_image(ordered_images[i], processed_path, target_dims)) {
+      continue;
+    }
+
+    // Upload to GCS sochee folder
+    std::string gcs_key = "images/sochee/" + uuid + ext;
+    std::string cmd = "gsutil cp \"" + processed_path + "\" gs://" +
+                      GCS_PUBLIC_BUCKET + "/" + gcs_key;
+    exec_command(cmd);
+    std::string gcs_url = GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + gcs_key;
+
+    // Insert into images table
+    sqlite3_stmt *stmt;
+    const char *insert_image_record =
+        "INSERT INTO images (original_url, filename, mime_type, content_id, "
+        "image_type, processing_status) VALUES (?, ?, ?, ?, ?, 'complete')";
+    if (sqlite3_prepare_v2(db, insert_image_record, -1, &stmt, nullptr) !=
+        SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+      sqlite3_close(db);
+      return false;
+    };
+    sqlite3_bind_text(stmt, 1, gcs_url.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, (uuid + ext).c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, ("image/" + ext).c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, content_id);
+    sqlite3_bind_text(stmt, 5, "sochee", -1, SQLITE_STATIC);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+      sqlite3_close(db);
+      return false;
+    }
+    sqlite3_finalize(stmt);
+    int image_id = (int)sqlite3_last_insert_rowid(db);
+
+    // Insert into sochee_order table
+    const char *insert_image_order = "INSERT INTO sochee_order (id, sochee_id, "
+                                     "photo_order) VALUES (?, ?, ?)";
+    if (sqlite3_prepare_v2(db, insert_image_order, -1, &stmt, nullptr) !=
+        SQLITE_OK) {
+      log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+      sqlite3_close(db);
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, image_id);
+    sqlite3_bind_int(stmt, 2, content_id);
+    sqlite3_bind_int(stmt, 3, i + 1);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+      sqlite3_finalize(stmt);
+      sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+      sqlite3_close(db);
+      return false;
+    }
+    sqlite3_finalize(stmt);
+
+    // Handle first image as thumbnail
+    if (i == 0) {
+      std::string thumb_uuid = generate_uuid();
+      std::string thumb_key = "images/thumbnails/" + thumb_uuid + ext;
+      std::string thumb_cmd = "gsutil cp \"" + processed_path + "\" gs://" +
+                              GCS_PUBLIC_BUCKET + "/" + thumb_key;
+      exec_command(thumb_cmd);
+      std::string thumb_url =
+          GCS_PUBLIC_URL + GCS_PUBLIC_BUCKET + "/" + thumb_key;
+
+      // Update content_blocks with thumbnail_url
+      const char *update_thumbnail_sql =
+          "UPDATE content_blocks SET thumbnail_url = ? WHERE id = ?";
+      if (sqlite3_prepare_v2(db, update_thumbnail_sql, -1, &stmt, nullptr)) {
+        log_to_file("SQL prepare error: " + std::string(sqlite3_errmsg(db)));
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        sqlite3_close(db);
+        return false;
+      }
+      sqlite3_bind_text(stmt, 1, thumb_url.c_str(), -1, SQLITE_STATIC);
+      sqlite3_bind_int(stmt, 2, content_id);
+      if (sqlite3_step(stmt) != SQLITE_DONE) {
+        log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
+        sqlite3_finalize(stmt);
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        sqlite3_close(db);
+        return false;
+      }
+      sqlite3_finalize(stmt);
+    }
+
+    fs::remove(processed_path);
+  }
+
+  sqlite3_close(db);
+  return true;
+}
+
+void handle_sochee_request(const HttpRequest &req, HttpResponse &res) {
+  log_to_file("Received sochee publish request");
+  std::string sochee_path;
+  // Log headers for debugging
+  log_to_file("Request headers:");
+  for (const auto &pair : req.headers) {
+    log_to_file("[Header] " + pair.first + ": " + pair.second);
+  }
+
+  // Log query params
+  log_to_file("Query parameters:");
+  for (const auto &pair : req.query_params) {
+    log_to_file("[Query] " + pair.first + ": " + pair.second);
+  }
+
+  // Determine article path
+  auto it = req.query_params.find("path");
+  if (it != req.query_params.end()) {
+    sochee_path = it->second;
+    log_to_file("Using path from query parameter: " + sochee_path);
+  } else if (!req.body.empty()) {
+    sochee_path = req.body;
+    log_to_file("Using path from request body: " + sochee_path);
+  } else {
+    log_to_file("No path provided in query parameters or request body");
+    res.send(400, "Missing path parameter. Provide it either as a query "
+                  "parameter '?path=' or in the request body.");
+    return;
+  }
+  if (!validate_sochee_structure(sochee_path)) {
+    res.send(400, "Invalid sochee structure");
+  }
+  auto metadata = parse_metadata(fs::path(sochee_path) / "metadata.txt");
+  int content_id = -1;
+  // if (!create_sochee_content_block(metadata, content_id)) {
+  //   res.send(500, "Failed to create content block");
+  //   return;
+  // }
+  if (!process_sochee_images(sochee_path, content_id, metadata)) {
+    res.send(500, "Failed to process images");
+    return;
+  }
+  // process_sochee_link(sochee_path, content_id);
+  res.send(200, "Sochee published with ID: " + std::to_string(content_id));
+}
+
 int main() {
   log_to_file("Starting Article Publisher Service");
 
@@ -652,6 +914,7 @@ int main() {
 
   HttpServer server(8082); // localhost only
   server.route("/publish", handle_publish_request);
+  server.route("/sochee", handle_sochee_request);
 
   log_to_file("Server initialized, listening on port 8082");
   server.run();

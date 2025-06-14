@@ -29,13 +29,15 @@ struct HttpResponse {
 
 struct HttpServer {
   int port;
-  std::function<void(const HttpRequest &, HttpResponse &)> handler;
+  std::map<std::string,
+           std::function<void(const HttpRequest &, HttpResponse &)>>
+      handlers;
 
   HttpServer(int p) : port(p) {}
 
   void route(const std::string &path,
              std::function<void(const HttpRequest &, HttpResponse &)> h) {
-    handler = h;
+    handlers[path] = h;
   }
 
   void run(); // Implemented in cpp

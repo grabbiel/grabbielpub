@@ -150,8 +150,8 @@ void HttpServer::run() {
       std::cout << "Query param: " << key << " = " << value << std::endl;
     }
 
-    if (handler && request.path == "/publish") {
-      handler(request, response);
+    if (handlers.find(request.path) != handlers.end()) {
+      handlers[request.path](request, response);
     } else {
       response.send(404, "Not Found");
     }
