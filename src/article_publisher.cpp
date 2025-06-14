@@ -1064,7 +1064,7 @@ bool process_sochee_link(const std::string &sochee_path, int content_id) {
   sqlite3_bind_text(stmt, 2, (uuid + ext).c_str(), -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 3, ("image/" + ext).c_str(), -1, SQLITE_STATIC);
   sqlite3_bind_int(stmt, 4, content_id);
-  sqlite3_bind_text(stmt, 5, "sochee_link", -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 5, "content", -1, SQLITE_STATIC);
   if (sqlite3_step(stmt) != SQLITE_DONE) {
     log_to_file("SQL execution error: " + std::string(sqlite3_errmsg(db)));
     sqlite3_finalize(stmt);
