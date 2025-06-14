@@ -733,9 +733,11 @@ bool process_sochee_images(
     }
   }
 
-  if (ordered_images.empty())
+  if (ordered_images.empty()) {
+    log_to_file(
+        "Did not find images listed in 1,2,3... keys inside media folder");
     return false;
-
+  }
   // Find target dimensions
   ImageDimensions target_dims = find_smallest_dimensions(ordered_images);
 
@@ -872,8 +874,20 @@ bool create_sochee_content_block(
   }
 
   sqlite3 *db;
-  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK)
+  if (sqlite3_open(DB_PATH.c_str(), &db) != SQLITE_OK) {
+    log_to_file("Failed to open database at " + DB_PATH + ": " +
+                std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
     return false;
+  }
+  // Begin transaction
+  if (sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) !=
+      SQLITE_OK) {
+    log_to_file("Failed to begin transaction: " +
+                std::string(sqlite3_errmsg(db)));
+    sqlite3_close(db);
+    return false;
+  }
 
   sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
 
