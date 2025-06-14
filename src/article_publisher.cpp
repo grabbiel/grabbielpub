@@ -889,8 +889,6 @@ bool create_sochee_content_block(
     return false;
   }
 
-  sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
-
   // Create content_blocks entry
   sqlite3_stmt *stmt;
   const char *cb_sql = "INSERT INTO content_blocks (title, url_slug, type_id, "
