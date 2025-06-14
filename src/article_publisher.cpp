@@ -95,7 +95,8 @@ std::string exec_command(const std::string &cmd) {
 
 // Parses metadata.txt (simple key = value format)
 std::unordered_map<std::string, std::string>
-parse_metadata(const fs::path &metadata_path) {
+parse_metadata(const fs::path &metadata_path,
+               const std::unordered_set<std::string> required) {
   std::unordered_map<std::string, std::string> metadata;
   std::ifstream infile(metadata_path);
   std::string line;
@@ -117,8 +118,7 @@ parse_metadata(const fs::path &metadata_path) {
   }
 
   // Log which required keys are missing
-  for (const auto &key :
-       {"title", "slug", "site_id", "status", "type_id", "language", "tags"}) {
+  for (const auto &key : required) {
     if (metadata.find(key) == metadata.end()) {
       log_to_file("Error: Required key missing from metadata: " +
                   std::string(key));
@@ -618,7 +618,8 @@ void handle_publish_request(const HttpRequest &req, HttpResponse &res) {
   }
 
   // Proceed with metadata parsing and database update
-  auto metadata = parse_metadata(meta_file);
+  auto metadata = parse_metadata(
+      meta_file, {"title", "slug", "language", "status", "tags", "type_id"});
   if (metadata.empty()) {
     log_to_file("Not enough metadata for article at " + article_path);
     res.send(500, "Metadata fetching failed");
@@ -1015,7 +1016,7 @@ bool process_sochee_link(const std::string &sochee_path, int content_id) {
 
   // Parse link.txt
   std::unordered_map<std::string, std::string> link_data =
-      parse_metadata(link_txt_path);
+      parse_metadata(link_txt_path, {"url", "name"});
   if (link_data.find("url") == link_data.end() ||
       link_data.find("name") == link_data.end()) {
     log_to_file("Missing required fields in link.txt (url, name)");
@@ -1132,7 +1133,10 @@ void handle_sochee_request(const HttpRequest &req, HttpResponse &res) {
   if (!validate_sochee_structure(sochee_path)) {
     res.send(400, "Invalid sochee structure");
   }
-  auto metadata = parse_metadata(fs::path(sochee_path) / "metadata.txt");
+  auto metadata =
+      parse_metadata(fs::path(sochee_path) / "metadata.txt",
+                     {"title", "status", "type_id", "language", "caption",
+                      "site_id", "status", "location", "hashtags", "1"});
   int content_id = -1;
   if (!create_sochee_content_block(metadata, content_id, sochee_path)) {
     res.send(500, "Failed to create content block");
