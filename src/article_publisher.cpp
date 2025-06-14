@@ -1,5 +1,6 @@
 #include "http_server.hpp"
 #include <chrono>
+#include <climits>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
